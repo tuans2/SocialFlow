@@ -101,12 +101,12 @@ class LinkedInAutomation(SocialAutomation):
         
         try:
             await self.page.goto(self.LOGIN_URL)
-            await self.page.wait_for_load_state("networkidle")
+            await self.page.wait_for_load_state("domcontentloaded")
             
             # Fill credentials
-            await self.page.fill('input#username', email)
-            await self.page.fill('input#password', password)
-            await self.page.click('button[type="submit"]')
+            await self.page.fill('input[type="email"]:visible', email)
+            await self.page.fill('input[type="password"]:visible', password)
+            await self.page.get_by_role('button', name='Đăng nhập', exact=True).click(no_wait_after=True)
             
             # Wait for navigation or security challenge
             await self.page.wait_for_timeout(3000)
@@ -134,7 +134,7 @@ class LinkedInAutomation(SocialAutomation):
         if await self.load_session(self.PLATFORM):
             try:
                 await self.page.goto(self.FEED_URL)
-                await self.page.wait_for_load_state("networkidle")
+                await self.page.wait_for_load_state("domcontentloaded")
                 return "/feed" in self.page.url
             except Exception:
                 pass
@@ -149,22 +149,24 @@ class LinkedInAutomation(SocialAutomation):
         
         try:
             await self.page.goto(self.FEED_URL)
-            await self.page.wait_for_load_state("networkidle")
+            await self.page.wait_for_load_state("domcontentloaded")
             await self.page.wait_for_timeout(2000)
             
             # Click "Start a post" button
-            start_post_btn = await self.page.wait_for_selector(
-                'button:has-text("Start a post"), button.share-box-feed-entry__trigger',
-                timeout=10000
+            start_post_btn = self.page.get_by_role(
+                "button", name="Start a post", exact=True
             )
-            await start_post_btn.click()
+            await start_post_btn.wait_for(state="visible", timeout=10000)
+            await start_post_btn.click(no_wait_after=True)
             await self.page.wait_for_timeout(1500)
             
             # Find the post editor
-            editor = await self.page.wait_for_selector(
-                'div.ql-editor[contenteditable="true"], div[role="textbox"]',
-                timeout=10000
+            editor = self.page.get_by_role(
+                "textbox",
+                name="Text editor for creating content",
+                exact=True
             )
+            await editor.wait_for(state="visible", timeout=10000)
             
             # Type content
             await editor.click()
@@ -185,11 +187,11 @@ class LinkedInAutomation(SocialAutomation):
                     await self.page.wait_for_timeout(2000)
             
             # Click Post button
-            post_btn = await self.page.wait_for_selector(
-                'button:has-text("Post"):not([disabled]), button.share-actions__primary-action',
-                timeout=10000
+            post_btn = self.page.get_by_role(
+                "button", name="Post", exact=True
             )
-            await post_btn.click()
+            await post_btn.wait_for(state="visible", timeout=10000)
+            await post_btn.click(no_wait_after=True)
             
             # Wait for post to complete
             await self.page.wait_for_timeout(3000)

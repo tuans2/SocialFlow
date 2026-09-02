@@ -794,28 +794,66 @@
 
             const save = async (publish = false) => {
                 if (!generated) return;
-                
+
                 const account = accounts.find(a => a.platform === platform);
                 if (publish && !account?.is_logged_in) {
                     alert(`Please connect your ${platform} account first!`);
                     return;
                 }
 
-                const post = await api.post('/posts', {
-                    platform,
-                    content_type: contentType,
-                    content: generated,
-                    scheduled_time: scheduleTime || null
-                });
+                try {
+                    const post = await api.post('/posts', {
+                        platform,
+                        content_type: contentType,
+                        content: generated,
+                        scheduled_time: scheduleTime || null
+                    });
 
-                if (publish && post.id) {
-                    await api.post(`/posts/${post.id}/publish`);
+                    if (publish && post.id) {
+                        alert('Publishing...');
+
+                        await api.post(`/posts/${post.id}/publish`);
+
+                        // Wait for the background publishing task.
+                        let finalPost = null;
+                        const maxAttempts = 60;
+
+                        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                            await new Promise(resolve => setTimeout(resolve, 2000));
+
+                            const postsResponse = await api.get('/posts');
+                            const posts = postsResponse.posts || [];
+                            finalPost = posts.find(p => p.id === post.id);
+
+                            if (finalPost?.status === 'published') {
+                                alert('✅ Published successfully!');
+                                break;
+                            }
+
+                            if (finalPost?.status === 'failed') {
+                                throw new Error(
+                                    finalPost.error_message || 'Publishing failed'
+                                );
+                            }
+                        }
+
+                        if (finalPost?.status === 'publishing') {
+                            throw new Error(
+                                'Publishing timed out. Please check the post status in Dashboard.'
+                            );
+                        }
+                    } else {
+                        alert('Saved as draft!');
+                    }
+
+                    setGenerated('');
+                    setTopic('');
+                    onCreated();
+
+                } catch (err) {
+                    console.error('Publish error:', err);
+                    alert(`❌ ${err.message || 'Publishing failed'}`);
                 }
-
-                alert(publish ? 'Publishing...' : 'Saved as draft!');
-                setGenerated('');
-                setTopic('');
-                onCreated();
             };
 
             return (

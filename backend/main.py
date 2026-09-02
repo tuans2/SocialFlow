@@ -335,12 +335,12 @@ async def _generate_gemini(prompt: str) -> str:
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={CONFIG['GEMINI_API_KEY']}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={CONFIG['GEMINI_API_KEY']}",
             headers={"Content-Type": "application/json"},
             json={
                 "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
                 "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"maxOutputTokens": 2000, "temperature": 0.8}
+                "generationConfig": {"maxOutputTokens": 2000}
             },
             timeout=60.0
         )
