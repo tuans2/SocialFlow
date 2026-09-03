@@ -1352,7 +1352,8 @@
                         <div className="card">
                             <div className="card-title">✨ AI Carousel Generator</div>
                             <p style={{ color: 'var(--text-muted)', marginBottom: '20px', fontSize: '13px' }}>
-                                Creates images + text with DALL-E 3 (~$0.04/slide)
+                                Slides are generated with the image model set in Settings,
+                                then saved to your Media Library.
                             </p>
 
                             <div className="form-label">Platform</div>
@@ -1456,6 +1457,12 @@
             const activeProvider = providers.find(p => p.name === provider);
             const aiProviders = providers.filter(p => p.name !== 'slideshow');
             const aiProvider = aiProviders.find(p => p.configured) || aiProviders[0];
+            // Only ever shows a number the provider actually gave us. An
+            // unconfigured rate means no price on the button, not a guess —
+            // this used to read a hardcoded "~$0.10" for every provider.
+            const aiCostLabel = (aiProvider && aiProvider.cost_per_second != null)
+                ? ` (~$${(aiProvider.cost_per_second * duration).toFixed(2)})`
+                : '';
             const [topic, setTopic] = useState('');
             const [prompt, setPrompt] = useState('');
             const [style, setStyle] = useState('engaging');
@@ -1526,7 +1533,7 @@
                         alert('Failed: ' + (res.error || res.detail || 'Unknown error'));
                     }
                 } catch (err) {
-                    alert('Generation failed. Check your API keys.');
+                    alert('Generation failed: ' + err);
                 }
                 setLoading(false);
             };
@@ -1555,7 +1562,7 @@
                         alert('Failed: ' + (res.error || res.detail || 'Unknown error'));
                     }
                 } catch (err) {
-                    alert('Generation failed. Check your Kling API key.');
+                    alert('Generation failed: ' + err);
                 }
                 setLoading(false);
             };
@@ -1742,7 +1749,7 @@
                                     </div>
 
                                     <button className="btn btn-primary" onClick={generateReel} disabled={loading || !topic} style={{ width: '100%' }}>
-                                        {loading ? <><div className="spinner" /> Generating...</> : `🎬 Generate Reel (~$0.10)`}
+                                        {loading ? <><div className="spinner" /> Generating...</> : `🎬 Generate Reel${aiCostLabel}`}
                                     </button>
                                 </>
                             ) : (
@@ -1771,7 +1778,7 @@
                                     </div>
 
                                     <button className="btn btn-primary" onClick={generateVideo} disabled={loading || !prompt} style={{ width: '100%' }}>
-                                        {loading ? <><div className="spinner" /> Generating...</> : `🎬 Generate Video (~$0.10)`}
+                                        {loading ? <><div className="spinner" /> Generating...</> : `🎬 Generate Video${aiCostLabel}`}
                                     </button>
                                 </>
                             )}
@@ -1830,7 +1837,11 @@
                                     <div className="empty-icon">🎬</div>
                                     <p>Your video will appear here</p>
                                     <p style={{ fontSize: '12px', marginTop: '8px', color: 'var(--text-muted)' }}>
-                                        Kling AI generates 5-10 second videos
+                                        {mode === 'slideshow'
+                                            ? 'Rendered on this machine — usually a few seconds'
+                                            : aiProvider
+                                                ? `${aiProvider.label} · ${aiProvider.durations.join('/')}s clips`
+                                                : 'No AI video provider configured'}
                                     </p>
                                 </div>
                             )}
@@ -2476,6 +2487,15 @@
         // Settings Page
         function Settings() {
             const [config, setConfig] = React.useState(null);
+            const [videoProviders, setVideoProviders] = React.useState([]);
+            const [defaultProvider, setDefaultProvider] = React.useState('');
+
+            React.useEffect(() => {
+                api.get('/video-providers').then(r => {
+                    setVideoProviders(r.providers || []);
+                    setDefaultProvider(r.default || '');
+                }).catch(() => {});
+            }, []);
             const [form, setForm] = React.useState({
                 AI_PROVIDER: 'openai',
                 OPENAI_API_KEY: '',
@@ -2562,7 +2582,8 @@
                     <div className="card">
                         <div className="card-title">🤖 AI Text Provider</div>
                         <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginBottom: '20px' }}>
-                            Choose which AI generates your social media content. Video generation always uses Kling AI.
+                            Choose which AI generates your social media content. Video uses whichever
+                            video provider is configured — see below.
                         </p>
 
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '24px' }}>
@@ -2626,8 +2647,48 @@
                     <div className="card">
                         <div className="card-title">🎬 Video Generation</div>
                         <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginBottom: '16px' }}>
-                            Video and Avatar generation uses Kling AI. Configure your key below.
+                            Video providers registered on this install. "slideshow" renders locally
+                            with ffmpeg and needs no key; the others need credentials. Note that
+                            "credentials set" is not the same as usable — a paid API can still refuse
+                            on quota or billing, which only a real generation reveals.
                         </p>
+
+                        <div style={{ marginBottom: '20px' }}>
+                            {videoProviders.length === 0
+                                ? <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Loading providers…</div>
+                                : videoProviders.map(p => (
+                                    <div key={p.name} style={{
+                                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                        padding: '10px 12px', marginBottom: '8px', borderRadius: '8px',
+                                        background: 'var(--bg-dark)', border: '1px solid var(--border)'
+                                    }}>
+                                        <div>
+                                            <div style={{ fontWeight: 600, fontSize: '13px' }}>
+                                                {p.label}
+                                                {p.name === defaultProvider && (
+                                                    <span style={{ marginLeft: '8px', fontSize: '10px', color: 'var(--accent)' }}>DEFAULT</span>
+                                                )}
+                                            </div>
+                                            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                                                {p.durations[0]}–{p.durations[p.durations.length - 1]}s · {p.aspect_ratios.join(', ')}
+                                                {p.cost_per_second === 0
+                                                    ? ' · free'
+                                                    : p.cost_per_second != null
+                                                        ? ` · $${p.cost_per_second}/s`
+                                                        : ' · rate not set'}
+                                            </div>
+                                        </div>
+                                        <span style={{ fontSize: '12px', color: p.configured ? '#10b981' : 'var(--text-muted)' }}
+                                              title={p.configured && p.cost_per_second !== 0
+                                                  ? 'Credentials are present. Whether the account is entitled to generate is only proven by actually running one.'
+                                                  : ''}>
+                                            {p.configured
+                                                ? (p.cost_per_second === 0 ? '● ready' : '● credentials set')
+                                                : '○ no credentials'}
+                                        </span>
+                                    </div>
+                                ))}
+                        </div>
                         <div style={{ marginBottom: '16px' }}>
                             <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px' }}>
                                 Kling AI API Key — <a href="https://klingai.com/global/dev" target="_blank" style={{ color: 'var(--accent)' }}>Get key ↗</a>
