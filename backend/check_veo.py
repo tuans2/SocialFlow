@@ -106,8 +106,13 @@ async def generate(key: str, model: str = None) -> int:
     cost = provider.estimated_cost(duration)
 
     print(f"\n→ About to generate a real {duration}s clip with {provider.model}.")
-    print(f"  Estimated cost: {'$%.2f' % cost if cost else 'unknown — VEO_COST_PER_SECOND is not set'}")
-    if input("  Type 'yes' to proceed: ").strip().lower() != "yes":
+    if cost:
+        print(f"  Estimated cost: ${cost:.2f}")
+    else:
+        print("  Estimated cost: not calculated — VEO_COST_PER_SECOND is unset in .env.")
+        print("  This is the cheapest tier and a short clip, so the charge is small,")
+        print("  but the exact figure comes from Google's pricing page, not from here.")
+    if input("  Proceed? [y/N]: ").strip().lower() not in ("y", "yes"):
         print("  Cancelled. Nothing was charged.")
         return 0
 
