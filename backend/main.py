@@ -29,7 +29,7 @@ from automation import get_automation, LinkedInAutomation, InstagramAutomation, 
 from automation_extended import get_automation_extended
 from openclaw_bridge import router as openclaw_router
 from heygen_routes import router as heygen_router
-from asset_inventory import init_asset_tables
+from asset_inventory import init_asset_tables, register_asset, update_asset
 from assets_routes import router as assets_router
 from migrations import run_migrations
 from analytics_store import init_analytics_tables, register_analytics_routes
@@ -46,7 +46,7 @@ UPLOADS_DIR = BACKEND_DIR / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
 
 # Shared media path resolution + publish quality gate (see backend/media_utils.py)
-from media_store import MediaRejected, store_upload
+from media_store import MediaRejected, store_bytes, store_upload
 from media_utils import (
     requires_image,
     resolve_media_path,
@@ -89,6 +89,7 @@ def load_config():
         "IMAGE_MODEL": os.getenv("IMAGE_MODEL", "gpt-image-1.5"),  # gpt-image-1.5 (replaces dall-e-3)
         # gpt-image-*: low | medium | high | auto ; dall-e-3: standard | hd
         "IMAGE_QUALITY": os.getenv("IMAGE_QUALITY", ""),
+        "IMAGE_COST_USD": os.getenv("IMAGE_COST_USD", ""),
         "ZALO_APP_ID": os.getenv("ZALO_APP_ID", ""),
         "ZALO_SECRET_KEY": os.getenv("ZALO_SECRET_KEY", ""),
         "ZALO_REFRESH_TOKEN": os.getenv("ZALO_REFRESH_TOKEN", ""),
@@ -377,10 +378,23 @@ async def _generate_gemini(prompt: str) -> str:
         raise HTTPException(status_code=503, detail=f"Failed to connect to Gemini API: {str(e)}")
 
 
-async def generate_image(prompt: str, size: str = "1024x1024", save_as: str = None) -> str:
-    """Generate image using GPT Image 1.5 (replaces deprecated DALL-E 3).
+def _image_cost_usd():
+    """Per-image cost, if the operator configured one. Never guessed."""
+    raw = (CONFIG.get("IMAGE_COST_USD") or "").strip()
+    try:
+        return float(raw) if raw else None
+    except ValueError:
+        return None
 
-    Returns: local file path to saved PNG.
+
+async def generate_image_asset(prompt: str, size: str = "1024x1024",
+                               save_as: str = None, title: str = "",
+                               topic: str = "", campaign: str = "",
+                               tags: list = None,
+                               parent_asset_id: str = None) -> dict:
+    """Generate an image and store it in the media library.
+
+    Returns the media_store record: asset_id, path, url, thumb_url, sha256...
     """
     import base64
     if not CONFIG["OPENAI_API_KEY"]:
@@ -427,13 +441,35 @@ async def generate_image(prompt: str, size: str = "1024x1024", save_as: str = No
         else:
             raise HTTPException(status_code=500, detail="No image data in response")
 
-        # Save locally
+        # Hand the bytes to the media store: it hashes, deduplicates, places
+        # the file under uploads/YYYY/MM/image/, thumbnails it and records an
+        # inventory row. Previously this wrote a loose file that nothing tracked.
         if not save_as:
             save_as = f"generated-{datetime.now().strftime('%Y%m%d-%H%M%S')}.png"
-        filepath = UPLOADS_DIR / save_as
-        with open(filepath, 'wb') as f:
-            f.write(image_bytes)
-        return str(filepath)
+
+        return store_bytes(
+            image_bytes,
+            declared_name=save_as,
+            origin="generated",
+            provider=model,
+            title=title or save_as,
+            topic=topic,
+            campaign=campaign,
+            tags=tags or [],
+            parent_asset_id=parent_asset_id,
+            cost_usd=_image_cost_usd(),
+            extra_metadata={
+                "prompt": prompt[:2000],
+                "size": size,
+                "quality": quality,
+            },
+        )
+
+
+async def generate_image(prompt: str, size: str = "1024x1024", save_as: str = None) -> str:
+    """Generate an image; returns its stored path (backwards-compatible shape)."""
+    result = await generate_image_asset(prompt, size, save_as=save_as)
+    return result["path"]
 
 
 # Keep backward compat alias
@@ -1150,13 +1186,20 @@ Make it engaging, authentic, and optimized for maximum reach.{output_rules}"""
         )
         filename = f"post_{request.platform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
         try:
-            saved = await generate_image(image_prompt, "1024x1024", save_as=filename)
-            abs_path = resolve_media_path(saved)
+            asset = await generate_image_asset(
+                image_prompt, "1024x1024", save_as=filename,
+                title=request.topic or filename,
+                topic=request.topic or "",
+                tags=["post", request.platform.lower()],
+            )
+            abs_path = resolve_media_path(asset["path"])
             if not abs_path:
                 raise RuntimeError("generated image file not found after saving")
             response["media_paths"] = [abs_path]
             response["image_path"] = abs_path
-            response["image_url"] = to_public_url(abs_path)
+            response["image_url"] = asset["url"]
+            response["asset_id"] = asset["asset_id"]
+            response["thumb_url"] = asset.get("thumb_url")
         except Exception as e:
             detail = e.detail if isinstance(e, HTTPException) else str(e)
             response["image_required"] = True
@@ -1212,9 +1255,30 @@ Return ONLY valid JSON, no other text."""
     except json.JSONDecodeError:
         return {"error": "Failed to parse AI response", "raw": content_response}
     
-    # Step 2: Generate images for each slide
+    # Step 2: Generate images for each slide.
+    # The carousel itself gets a parent asset row (no file of its own) so the
+    # set can be pulled back out of the library as one thing later; each slide
+    # links to it via parent_asset_id.
     generated_images = []
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    carousel_asset = register_asset(
+        asset_type="carousel",
+        source="carousel-maker",
+        title=request.topic,
+        description=carousel_data.get("caption", "")[:500],
+        topic=request.topic,
+        tags=["carousel", request.platform, request.style],
+        origin="generated",
+        provider=CONFIG.get("IMAGE_MODEL", "gpt-image-1.5"),
+        metadata={
+            "platform": request.platform,
+            "style": request.style,
+            "slide_count": len(carousel_data.get("slides", [])),
+            "caption": carousel_data.get("caption", ""),
+        },
+    )
+    carousel_asset_id = carousel_asset["asset_id"]
     
     for i, slide in enumerate(carousel_data.get("slides", [])):
         image_prompt = slide.get("image_prompt", request.topic)
@@ -1232,14 +1296,22 @@ Do NOT include any text in the image."""
 
         try:
             filename = f"carousel_{timestamp}_slide_{i+1}.png"
-            local_path = await generate_image(enhanced_prompt, "1024x1024", save_as=filename)
-            
+            asset = await generate_image_asset(
+                enhanced_prompt, "1024x1024", save_as=filename,
+                title=f"{request.topic} — slide {i+1}",
+                topic=request.topic,
+                tags=["carousel", "slide", request.platform],
+                parent_asset_id=carousel_asset_id,
+            )
+
             generated_images.append({
                 "slide_number": i + 1,
                 "headline": slide.get("headline", ""),
                 "body": slide.get("body", ""),
-                "image_path": local_path,
-                "image_url": f"/uploads/{filename}"
+                "image_path": asset["path"],
+                "image_url": asset["url"],
+                "thumb_url": asset.get("thumb_url"),
+                "asset_id": asset["asset_id"],
             })
         except Exception as e:
             generated_images.append({
@@ -1249,6 +1321,15 @@ Do NOT include any text in the image."""
                 "error": str(e)
             })
     
+    # Record how many slides actually made it, so a partially failed carousel
+    # is visible in the library rather than silently looking complete.
+    ok_slides = [g for g in generated_images if g.get("image_path")]
+    update_asset(
+        carousel_asset_id,
+        description=(carousel_data.get("caption", "") or "")[:500],
+        state="available" if len(ok_slides) == len(generated_images) else "partial",
+    )
+
     return {
         "success": True,
         "carousel": {
@@ -1257,6 +1338,9 @@ Do NOT include any text in the image."""
             "style": request.style,
             "slides": generated_images,
             "caption": carousel_data.get("caption", ""),
+            "asset_id": carousel_asset_id,
+            "slides_ok": len(ok_slides),
+            "slides_total": len(generated_images),
             "generated_at": datetime.now().isoformat()
         }
     }
