@@ -278,6 +278,10 @@ class HeyGenVideoAdapter(SocialAutomation):
         """
         Execute a video generation job via HeyGen browser automation.
 
+        DEPRECATED in favour of video_providers/heygen.py, which uses the REST
+        API. Driving the editor means guessing at selectors that change without
+        notice, and it cannot tell "rendered" from "the button moved".
+
         This method:
         1. Loads the job from the job store
         2. Opens HeyGen editor
@@ -364,51 +368,63 @@ class HeyGenVideoAdapter(SocialAutomation):
                     # We mark the job as generating and provide the brief
                     await self.save_session(self.PLATFORM)
 
+                    # Generation was *started*. HeyGen renders asynchronously,
+                    # so the video does not exist yet; GENERATING is the honest
+                    # state until something confirms an output.
                     update_job_state(
                         job_id,
-                        HeyGenJobState.COMPLETED,
-                        details="Video generation initiated in HeyGen. Check HeyGen dashboard for output.",
+                        HeyGenJobState.GENERATING,
+                        details="Generation started in the HeyGen editor. "
+                                "Register the output when it is ready.",
                         output_url=self.page.url
                     )
 
                     return {
                         "success": True,
                         "job_id": job_id,
-                        "state": HeyGenJobState.COMPLETED,
-                        "message": "Video generation initiated in HeyGen editor.",
+                        "state": HeyGenJobState.GENERATING,
+                        "message": "Video generation started in the HeyGen editor. "
+                                   "It is not finished yet.",
                         "heygen_url": self.page.url,
                         "script_preview": job["script"][:200]
                     }
                 else:
-                    # Editor opened but no generate button found
+                    # The script went in but the Generate button was not found,
+                    # so nothing is rendering. Reporting COMPLETED here — which
+                    # this used to do — makes a job that produced no video look
+                    # finished, and the failure only surfaces when someone goes
+                    # looking for a file that was never made.
                     await self.save_session(self.PLATFORM)
                     update_job_state(
                         job_id,
-                        HeyGenJobState.COMPLETED,
-                        details="HeyGen editor opened with script. Manual generation needed.",
-                        output_url=self.page.url
+                        HeyGenJobState.FAILED,
+                        error="Script loaded but the Generate button was not found; "
+                              "nothing was rendered. Press Generate in the editor, "
+                              "or use the HeyGen API provider instead.",
                     )
                     return {
-                        "success": True,
+                        "success": False,
                         "job_id": job_id,
-                        "state": HeyGenJobState.COMPLETED,
-                        "message": "HeyGen editor opened with script loaded. Click generate manually.",
+                        "state": HeyGenJobState.FAILED,
+                        "message": "HeyGen editor opened with the script loaded, but "
+                                   "generation was not started.",
                         "heygen_url": self.page.url
                     }
             else:
-                # Could not find script input — open editor for manual use
+                # No script input found: the script was never entered and
+                # nothing is rendering. Same reasoning as above.
                 await self.save_session(self.PLATFORM)
                 update_job_state(
                     job_id,
-                    HeyGenJobState.COMPLETED,
-                    details="HeyGen editor opened but script input not found. Manual entry needed.",
-                    output_url=self.page.url
+                    HeyGenJobState.FAILED,
+                    error="Script input not found in the HeyGen editor; the script "
+                          "was never entered and nothing was rendered.",
                 )
                 return {
-                    "success": True,
+                    "success": False,
                     "job_id": job_id,
-                    "state": HeyGenJobState.COMPLETED,
-                    "message": "HeyGen editor opened. Script input area not auto-detected. Enter script manually.",
+                    "state": HeyGenJobState.FAILED,
+                    "message": "HeyGen editor opened but the script area was not found.",
                     "script": job["script"][:2000],
                     "heygen_url": self.page.url
                 }

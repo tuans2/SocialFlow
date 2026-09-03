@@ -1857,24 +1857,37 @@
             const [photo, setPhoto] = useState(null);
             const [photoPreview, setPhotoPreview] = useState(null);
             const [photoUrl, setPhotoUrl] = useState('');
-            const [scriptMode, setScriptMode] = useState('generate'); // generate, write, upload_audio
+            const [scriptMode, setScriptMode] = useState('generate'); // generate | write
             const [topic, setTopic] = useState('');
             const [script, setScript] = useState('');
             const [tone, setTone] = useState('professional');
             const [audioFile, setAudioFile] = useState(null);
             const [audioUrl, setAudioUrl] = useState('');
-            const [voiceId, setVoiceId] = useState('en_female_1');
+            const [voiceId, setVoiceId] = useState('');
             const [loading, setLoading] = useState(false);
             const [result, setResult] = useState(null);
             const [videoStatus, setVideoStatus] = useState(null);
             const [polling, setPolling] = useState(false);
 
-            const voices = [
-                { id: 'en_female_1', label: '👩 Female (English)' },
-                { id: 'en_male_1', label: '👨 Male (English)' },
-                { id: 'en_female_2', label: '👩‍💼 Professional Female' },
-                { id: 'en_male_2', label: '👨‍💼 Professional Male' },
-            ];
+            // Voices and avatars come from the account, not a hardcoded list.
+            // The four ids that used to live here were Kling's; HeyGen rejects
+            // them, so every generation would have failed on an invented value.
+            const [catalog, setCatalog] = useState({ avatars: [], voices: [], loaded: false, error: '' });
+            const [avatarId, setAvatarId] = useState('');
+            const [voiceFilter, setVoiceFilter] = useState('');
+
+            useEffect(() => {
+                api.get('/avatar-catalog').then(r => {
+                    setCatalog({ avatars: r.avatars || [], voices: r.voices || [], loaded: true, error: r.error || '' });
+                    if (r.voices && r.voices.length) setVoiceId(r.voices[0].id);
+                }).catch(e => setCatalog({ avatars: [], voices: [], loaded: true, error: String(e) }));
+            }, []);
+
+            const voices = (catalog.voices || []).filter(v => {
+                if (!voiceFilter) return true;
+                const hay = `${v.name || ''} ${v.language || ''} ${v.gender || ''}`.toLowerCase();
+                return hay.includes(voiceFilter.toLowerCase());
+            }).slice(0, 60);
 
             const tones = [
                 { id: 'professional', label: '💼 Professional' },
@@ -1970,13 +1983,16 @@
             };
 
             const generateAvatar = async () => {
-                if (!photoUrl) {
-                    alert('Please upload your photo first');
+                if (!photoUrl && !avatarId) {
+                    alert('Upload a photo or choose an avatar first');
                     return;
                 }
-                
-                if (scriptMode !== 'upload_audio' && !script) {
-                    alert('Please add a script or upload audio');
+                if (!script) {
+                    alert('Add a script first');
+                    return;
+                }
+                if (!voiceId) {
+                    alert('Choose a voice — the list comes from your HeyGen account');
                     return;
                 }
 
@@ -1986,16 +2002,14 @@
 
                 try {
                     const payload = {
-                        image_url: photoUrl,
-                        prompt: 'speaking naturally with a friendly, professional expression, slight head movements',
-                        mode: 'std'
+                        aspect_ratio: '9:16',
+                        text: script,
+                        voice_id: voiceId
                     };
-
-                    if (scriptMode === 'upload_audio' && audioUrl) {
-                        payload.audio_url = audioUrl;
+                    if (avatarId) {
+                        payload.avatar_id = avatarId;
                     } else {
-                        payload.text = script;
-                        payload.voice_id = voiceId;
+                        payload.image_url = photoUrl;
                     }
 
                     const res = await api.post('/generate-avatar', payload);
@@ -2007,7 +2021,7 @@
                         alert('Failed: ' + (res.error || res.detail || 'Unknown error'));
                     }
                 } catch (err) {
-                    alert('Avatar generation failed. Check your Kling API key.');
+                    alert('Avatar generation failed: ' + err);
                 }
                 setLoading(false);
             };
@@ -2053,14 +2067,48 @@
                     <div className="grid-2">
                         <div className="card">
                             <div className="card-title">✨ Create Your Talking Avatar</div>
-                            <p style={{ color: 'var(--text-muted)', marginBottom: '20px', fontSize: '13px' }}>
+                            <p style={{ color: 'var(--text-muted)', marginBottom: '16px', fontSize: '13px' }}>
                                 Upload your photo → Add script → Get video of YOU talking!
                             </p>
+
+                            {catalog.loaded && catalog.voices.length === 0 && (
+                                <div className="reject-note" style={{ marginBottom: '20px' }}>
+                                    <b>HeyGen is not set up yet</b>, so nothing here can render.
+                                    <div style={{ marginTop: '6px', color: 'var(--text-muted)' }}>
+                                        {catalog.error || 'No API key configured.'}
+                                    </div>
+                                    <div style={{ marginTop: '6px', color: 'var(--text-muted)' }}>
+                                        The HeyGen email and password in .env are the web login, not an
+                                        API key. Add <code>HEYGEN_API_KEY</code> to .env, then run
+                                        <code> python3 backend/check_heygen.py</code>.
+                                    </div>
+                                </div>
+                            )}
 
                             {/* Step 1: Upload Photo */}
                             <div style={{ marginBottom: '24px', padding: '16px', background: step >= 1 ? 'rgba(139,92,246,0.1)' : 'var(--bg-dark)', borderRadius: '12px', border: step === 1 ? '2px solid var(--accent)' : '1px solid var(--border)' }}>
                                 <div style={{ fontWeight: '600', marginBottom: '12px' }}>📸 Step 1: Your Photo</div>
                                 
+                                {catalog.loaded && catalog.avatars.length > 0 && (
+                                    <div style={{ marginBottom: '14px' }}>
+                                        <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px' }}>
+                                            Or use an avatar from your HeyGen account:
+                                        </div>
+                                        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', maxHeight: '92px', overflowY: 'auto' }}>
+                                            {catalog.avatars.slice(0, 30).map(a => (
+                                                <button key={a.id} onClick={() => { setAvatarId(a.id); setStep(2); }} style={{
+                                                    padding: '5px 9px', borderRadius: '6px', fontSize: '11px',
+                                                    border: avatarId === a.id ? '2px solid var(--accent)' : '1px solid var(--border)',
+                                                    background: avatarId === a.id ? 'rgba(139,92,246,0.1)' : 'transparent',
+                                                    color: 'var(--text)', cursor: 'pointer'
+                                                }} title={a.id}>
+                                                    {a.name || a.id}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
                                 {photoPreview ? (
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
                                         <img src={photoPreview} alt="Your photo" style={{ width: '80px', height: '80px', borderRadius: '12px', objectFit: 'cover' }} />
@@ -2087,7 +2135,7 @@
                                 <div style={{ fontWeight: '600', marginBottom: '12px' }}>🎙️ Step 2: What Should You Say?</div>
                                 
                                 <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
-                                    {[['generate', '✨ AI Generate'], ['write', '✍️ Write Script'], ['upload_audio', '🎤 Upload Audio']].map(([id, label]) => (
+                                    {[['generate', '✨ AI Generate'], ['write', '✍️ Write Script']].map(([id, label]) => (
                                         <button key={id} onClick={() => setScriptMode(id)} disabled={step < 2} style={{
                                             flex: 1, padding: '8px', borderRadius: '8px', fontSize: '11px', cursor: 'pointer',
                                             border: scriptMode === id ? '2px solid var(--accent)' : '1px solid var(--border)',
@@ -2126,37 +2174,55 @@
                                     </div>
                                 )}
 
-                                {scriptMode === 'upload_audio' && (
-                                    <div>
-                                        <input type="file" accept="audio/*" onChange={handleAudioSelect} style={{ display: 'none' }} id="audio-upload" />
-                                        <label htmlFor="audio-upload" className="btn btn-secondary" style={{ cursor: 'pointer', display: 'inline-flex', width: '100%', justifyContent: 'center' }}>
-                                            🎤 {audioFile ? audioFile.name : 'Upload Your Voice Recording'}
-                                        </label>
-                                        {audioUrl && <p style={{ color: 'var(--success)', fontSize: '12px', marginTop: '8px' }}>✅ Audio uploaded</p>}
-                                    </div>
-                                )}
+                                {/* "Upload your own voice recording" needs the audio to live on
+                                    HeyGen (an audio_asset_id), not on this machine — HeyGen cannot
+                                    read a local file. Removed rather than left as a control that
+                                    silently does nothing. */}
 
-                                {scriptMode !== 'upload_audio' && script && (
+                                {script && (
                                     <div style={{ marginTop: '12px' }}>
-                                        <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px' }}>Voice:</div>
-                                        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                                            {voices.map(v => (
-                                                <button key={v.id} onClick={() => setVoiceId(v.id)} style={{
-                                                    padding: '6px 10px', borderRadius: '6px', fontSize: '11px',
-                                                    border: voiceId === v.id ? '2px solid var(--accent)' : '1px solid var(--border)',
-                                                    background: voiceId === v.id ? 'rgba(139,92,246,0.1)' : 'transparent', color: 'var(--text)', cursor: 'pointer'
-                                                }}>
-                                                    {v.label}
-                                                </button>
-                                            ))}
+                                        <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px' }}>
+                                            Voice {catalog.loaded && catalog.voices.length ? `(${catalog.voices.length} available)` : ''}
                                         </div>
+
+                                        {!catalog.loaded ? (
+                                            <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Loading voices…</div>
+                                        ) : catalog.voices.length === 0 ? (
+                                            <div className="reject-note">
+                                                No voices available. {catalog.error || 'HeyGen is not configured.'}
+                                                <div style={{ marginTop: 6, color: 'var(--text-muted)' }}>
+                                                    Run <code>python3 backend/check_heygen.py</code> to see what this key can use.
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <>
+                                                <input type="text" className="form-input" placeholder="Filter — e.g. vietnamese, female"
+                                                       value={voiceFilter} onChange={e => setVoiceFilter(e.target.value)}
+                                                       style={{ marginBottom: '8px', padding: '6px 10px', fontSize: '12px' }} />
+                                                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', maxHeight: '132px', overflowY: 'auto' }}>
+                                                    {voices.map(v => (
+                                                        <button key={v.id} onClick={() => setVoiceId(v.id)} style={{
+                                                            padding: '6px 10px', borderRadius: '6px', fontSize: '11px',
+                                                            border: voiceId === v.id ? '2px solid var(--accent)' : '1px solid var(--border)',
+                                                            background: voiceId === v.id ? 'rgba(139,92,246,0.1)' : 'transparent',
+                                                            color: 'var(--text)', cursor: 'pointer'
+                                                        }} title={v.id}>
+                                                            {v.name || v.id}
+                                                            {v.language ? <span style={{ color: 'var(--text-muted)' }}> · {v.language}</span> : null}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            </>
+                                        )}
                                     </div>
                                 )}
                             </div>
 
                             {/* Step 3: Generate */}
-                            <button className="btn btn-primary" onClick={generateAvatar} disabled={loading || !photoUrl || (scriptMode !== 'upload_audio' && !script) || (scriptMode === 'upload_audio' && !audioUrl)} style={{ width: '100%' }}>
-                                {loading ? <><div className="spinner" /> Creating Avatar Video...</> : '🎬 Generate Avatar Video (~$0.10)'}
+                            <button className="btn btn-primary" onClick={generateAvatar}
+                                    disabled={loading || (!photoUrl && !avatarId) || !script || !voiceId}
+                                    style={{ width: '100%' }}>
+                                {loading ? <><div className="spinner" /> Creating Avatar Video...</> : '🎬 Generate Avatar Video'}
                             </button>
                         </div>
 

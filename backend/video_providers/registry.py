@@ -9,6 +9,7 @@ import os
 from typing import Dict, List, Optional
 
 from .base import ProviderError, VideoProvider
+from .heygen import HeyGenProvider
 from .slideshow import SlideshowProvider
 from .veo import VeoProvider
 
@@ -28,6 +29,9 @@ def _bootstrap():
     # unconditionally so it is always an option when a paid provider is
     # unavailable; is_configured() reports whether ffmpeg is actually there.
     register(SlideshowProvider())
+    # Avatar videos. Registered unconditionally so the UI can say what it
+    # needs; is_configured() reports whether a key is actually present.
+    register(HeyGenProvider())
     # Kling is registered only when a key exists: the integration in main.py
     # predates this abstraction, was never verified against the live API, and
     # should not be offered as a working option just because the file is there.
@@ -80,4 +84,6 @@ def _configuration_hint(name: str) -> str:
         "veo": "Add GEMINI_API_KEY to .env — the same key text generation uses.",
         "kling": "Add KLING_API_KEY to .env.",
         "slideshow": "Install ffmpeg — on macOS: brew install ffmpeg",
+        "heygen": "Add HEYGEN_API_KEY to .env (from HeyGen's API settings, "
+                  "not the web login already stored there).",
     }.get(name, "Check the provider's credentials in .env.")

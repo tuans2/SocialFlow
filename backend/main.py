@@ -197,13 +197,19 @@ class ReelRequest(BaseModel):
 
 
 class AvatarRequest(BaseModel):
-    image_url: Optional[str] = None  # URL to your photo
-    image_path: Optional[str] = None  # Or local path
-    text: Optional[str] = None  # Script to speak (uses TTS)
-    audio_url: Optional[str] = None  # Or provide your own audio
-    voice_id: str = "en_female_1"  # TTS voice
+    image_url: Optional[str] = None   # /uploads URL, asset path, or absolute path
+    image_path: Optional[str] = None
+    text: Optional[str] = None        # script to speak
+    audio_url: Optional[str] = None   # legacy; use audio_asset_id
+    audio_asset_id: Optional[str] = None
+    voice_id: Optional[str] = None    # from /api/avatar-catalog
+    avatar_id: Optional[str] = None       # a stock avatar instead of a photo
+    talking_photo_id: Optional[str] = None
+    aspect_ratio: str = "9:16"
+    duration: Optional[int] = None
+    provider: Optional[str] = None
     prompt: str = "speaking naturally with a friendly, professional expression"
-    mode: str = "std"  # std or pro
+    mode: str = "std"
 
 
 class AvatarScriptRequest(BaseModel):
@@ -1711,36 +1717,103 @@ Quality: High quality, vibrant colors, professional look."""
 
 
 # --- Avatar Video Generation ---
-@app.post("/api/generate-avatar")
-async def generate_avatar(request: AvatarRequest):
-    """Generate talking avatar video from your photo"""
-    
+@app.get("/api/avatar-catalog")
+async def avatar_catalog():
+    """Avatars and voices this account can use.
+
+    Also the cheapest proof that the key works: it is an authenticated read,
+    so a successful response means real credentials, unlike a public model
+    listing.
+    """
     try:
-        # Determine image URL
-        image_url = request.image_url
-        if request.image_path and not image_url:
-            # If local path provided, we need to serve it or upload
-            # For now, assume it's a URL or will be converted
-            image_url = request.image_path
-        
-        if not image_url:
-            raise HTTPException(status_code=400, detail="image_url or image_path is required")
-        
-        result = await KlingAI.generate_avatar_video(
-            image_url=image_url,
-            audio_url=request.audio_url,
-            text=request.text,
-            voice_id=request.voice_id,
-            prompt=request.prompt,
-            mode=request.mode
-        )
-        
+        provider = video_providers.get("heygen")
+        avatars = await provider.list_avatars()
+        voices = await provider.list_voices()
         return {
             "success": True,
-            "task_id": result.get("task_id"),
-            "status": "processing",
-            "message": "Avatar video generation started"
+            "avatars": [
+                {"id": a.get("avatar_id") or a.get("talking_photo_id"),
+                 "name": a.get("avatar_name") or a.get("talking_photo_name"),
+                 "gender": a.get("gender"),
+                 "preview": a.get("preview_image_url")}
+                for a in avatars
+            ][:200],
+            "voices": [
+                {"id": v.get("voice_id"), "name": v.get("name"),
+                 "language": v.get("language"), "gender": v.get("gender")}
+                for v in voices
+            ][:400],
         }
+    except ProviderError as e:
+        return {"success": False, "error": e.reason, "avatars": [], "voices": []}
+    except Exception as e:
+        return {"success": False, "error": str(e), "avatars": [], "voices": []}
+
+
+@app.post("/api/generate-avatar")
+async def generate_avatar(request: AvatarRequest):
+    """Generate a talking avatar video.
+
+    Routed through the provider registry like every other video path. The
+    previous implementation called an unverified Kling endpoint that does not
+    exist in that API, behind a key that was never configured — so this button
+    has never produced a video.
+    """
+    try:
+        provider = video_providers.get(getattr(request, "provider", None) or "heygen")
+
+        # A photo already in the library, an /uploads URL, or an absolute path.
+        image_bytes = image_mime = None
+        source = request.image_url or request.image_path
+        if source and not (request.avatar_id or request.talking_photo_id):
+            image_bytes, image_mime = await _read_local_image(source)
+
+        audio_asset_id = request.audio_asset_id
+        if not audio_asset_id and request.audio_url:
+            raise HTTPException(
+                status_code=400,
+                detail="Pass audio_asset_id (a HeyGen asset) rather than a local "
+                       "audio URL — HeyGen cannot read a file on this machine.",
+            )
+
+        job = await provider.submit(
+            request.text or "",
+            duration=request.duration,
+            aspect_ratio=request.aspect_ratio,
+            image_bytes=image_bytes,
+            image_mime=image_mime or "image/png",
+            avatar_id=request.avatar_id,
+            talking_photo_id=request.talking_photo_id,
+            voice_id=request.voice_id,
+            audio_asset_id=audio_asset_id,
+        )
+
+        duration = job.raw.get("duration") or provider.normalise_duration(request.duration)
+        record = video_job_store.create(
+            provider.name, job.provider_job_id,
+            prompt=request.text or "", kind="avatar",
+            params={"aspect_ratio": job.raw.get("aspect_ratio"),
+                    "duration": duration,
+                    "model": job.raw.get("model"),
+                    "character": job.raw.get("character")},
+            cost_usd=provider.estimated_cost(duration),
+        )
+
+        return {
+            "success": True,
+            "task_id": record["job_id"],
+            "job_id": record["job_id"],
+            "provider": provider.name,
+            "status": "processing",
+            "estimated_cost_usd": record["cost_usd"],
+            "message": f"{provider.label} is generating. "
+                       f"Poll /api/video-status/{record['job_id']}.",
+        }
+
+    except ProviderError as e:
+        return {"success": False, "error": e.reason}
+    except HTTPException as e:
+        return {"success": False, "error": e.detail}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
