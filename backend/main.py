@@ -30,6 +30,8 @@ from automation_extended import get_automation_extended
 from openclaw_bridge import router as openclaw_router
 from heygen_routes import router as heygen_router
 from asset_inventory import init_asset_tables
+from assets_routes import router as assets_router
+from migrations import run_migrations
 from analytics_store import init_analytics_tables, register_analytics_routes
 from visual_content_routes import router as visual_router
 from brand_kit import router as brand_router, init_brand_tables
@@ -38,11 +40,13 @@ from agents.scout import init_signals_table
 from agents.planner import init_plans_table
 
 # ============== CONFIG ==============
-DATABASE_PATH = "socialflow.db"
-UPLOADS_DIR = Path("uploads")
+BACKEND_DIR = Path(__file__).resolve().parent
+DATABASE_PATH = str(BACKEND_DIR / "socialflow.db")
+UPLOADS_DIR = BACKEND_DIR / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
 
 # Shared media path resolution + publish quality gate (see backend/media_utils.py)
+from media_store import MediaRejected, store_upload
 from media_utils import (
     requires_image,
     resolve_media_path,
@@ -808,8 +812,13 @@ app.add_middleware(
 app.include_router(openclaw_router)
 # Register HeyGen video + asset inventory routes
 app.include_router(heygen_router)
-# Initialize asset inventory tables
+# Initialize asset inventory tables, then apply any pending column additions.
+# CREATE TABLE IF NOT EXISTS is a no-op once a table exists, so new columns on
+# an existing assets table only arrive through run_migrations().
 init_asset_tables()
+run_migrations()
+# Register the media library (upload / browse / reuse)
+app.include_router(assets_router)
 # Initialize analytics tables and routes
 init_analytics_tables()
 register_analytics_routes(app)
@@ -819,7 +828,7 @@ app.include_router(visual_router)
 app.include_router(brand_router)
 
 # Serve frontend
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 
 # ============== API ROUTES ==============
 
@@ -1443,54 +1452,61 @@ Return ONLY the script text that will be spoken. No formatting, no stage directi
         return {"success": False, "error": str(e)}
 
 
+# --- Uploads -------------------------------------------------------------
+# All three legacy endpoints below now funnel into media_store.store_upload(),
+# which sniffs the real type from the file's bytes, enforces a size cap while
+# streaming, deduplicates by sha256 and registers the result in the asset
+# inventory. Their URLs and response shapes are unchanged so the existing
+# frontend keeps working; each response just gains an asset_id.
+
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/")
+
+
+def _upload_response(result: dict) -> dict:
+    """Legacy response shape, plus the new asset_id."""
+    url = result.get("url") or ""
+    return {
+        "success": True,
+        "filename": Path(result.get("path") or url).name,
+        "path": result.get("path"),
+        "url": url,
+        "full_url": f"{PUBLIC_BASE_URL}{url}",
+        "asset_id": result.get("asset_id"),
+        "deduped": result.get("deduped", False),
+        "thumb_url": result.get("thumb_url"),
+    }
+
+
+async def _ingest(file: UploadFile, *, expect: str = None, tags=None) -> dict:
+    """Shared ingest with a friendly error when the type is not what we want."""
+    try:
+        result = await store_upload(file, origin="uploaded", provider="user",
+                                    tags=tags or [])
+    except MediaRejected as e:
+        raise HTTPException(status_code=e.status_code, detail=e.reason)
+
+    if expect and result.get("asset_type") != expect:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Expected {expect}, got {result.get('asset_type')} "
+                   f"(type detected from the file contents, not its name)",
+        )
+    return result
+
+
 @app.post("/api/upload-avatar-photo")
 async def upload_avatar_photo(file: UploadFile = File(...)):
     """Upload photo for avatar generation"""
-    
-    # Validate file type
-    allowed_types = ["image/jpeg", "image/png", "image/webp"]
-    if file.content_type not in allowed_types:
-        raise HTTPException(status_code=400, detail="Only JPG, PNG, WebP images allowed")
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"avatar_{timestamp}_{file.filename}"
-    filepath = UPLOADS_DIR / filename
-    
-    with open(filepath, "wb") as f:
-        content = await file.read()
-        f.write(content)
-    
-    return {
-        "success": True,
-        "filename": filename,
-        "path": str(filepath),
-        "url": f"/uploads/{filename}",
-        "full_url": f"http://localhost:8000/uploads/{filename}"
-    }
+    result = await _ingest(file, expect="image", tags=["avatar"])
+    return _upload_response(result)
 
 
 @app.post("/api/upload-audio")
 async def upload_audio(file: UploadFile = File(...)):
     """Upload audio for avatar/lip-sync"""
-    
-    allowed_types = ["audio/mpeg", "audio/wav", "audio/mp3", "audio/x-wav", "audio/ogg"]
-    # Be more permissive with audio types
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"audio_{timestamp}_{file.filename}"
-    filepath = UPLOADS_DIR / filename
-    
-    with open(filepath, "wb") as f:
-        content = await file.read()
-        f.write(content)
-    
-    return {
-        "success": True,
-        "filename": filename,
-        "path": str(filepath),
-        "url": f"/uploads/{filename}",
-        "full_url": f"http://localhost:8000/uploads/{filename}"
-    }
+    result = await _ingest(file, expect="audio", tags=["voiceover"])
+    return _upload_response(result)
+
 
 # --- Posts CRUD ---
 @app.get("/api/posts")
@@ -1630,16 +1646,9 @@ async def publish_now(post_id: int, background_tasks: BackgroundTasks):
 # --- File Upload ---
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...)):
-    """Upload media file"""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{timestamp}_{file.filename}"
-    filepath = UPLOADS_DIR / filename
-    
-    with open(filepath, "wb") as f:
-        content = await file.read()
-        f.write(content)
-    
-    return {"filename": filename, "path": str(filepath)}
+    """Upload media file (any supported type)"""
+    result = await _ingest(file)
+    return _upload_response(result)
 
 # --- Config ---
 @app.get("/api/config")

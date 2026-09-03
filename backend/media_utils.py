@@ -132,12 +132,29 @@ def resolve_media_paths(paths: Any) -> Tuple[List[str], List[str]]:
 
 
 def to_public_url(path: Any) -> Optional[str]:
-    """Filesystem path -> browser URL served by the existing /uploads mount."""
+    """Filesystem path -> browser URL served by the existing /uploads mount.
+
+    Preserves any sub-directory under uploads/. Files are now stored as
+    uploads/YYYY/MM/<category>/<sha>.<ext>, so flattening to the bare filename
+    (as this used to do) would produce a URL that 404s.
+    """
     if not path:
         return None
-    raw = str(path)
+    raw = str(path).replace("\\", "/")
     if raw.startswith("/uploads/"):
         return raw
+
+    try:
+        rel = Path(raw).resolve().relative_to(UPLOADS_DIR)
+        return f"/uploads/{rel.as_posix()}"
+    except (ValueError, OSError):
+        pass
+
+    marker = "uploads/"
+    idx = raw.rfind(marker)
+    if idx != -1:
+        return f"/uploads/{raw[idx + len(marker):]}"
+
     return f"/uploads/{Path(raw).name}"
 
 

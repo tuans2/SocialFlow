@@ -16,7 +16,8 @@ from typing import Optional, List, Dict
 from pathlib import Path
 
 
-DATABASE_PATH = "socialflow.db"
+BACKEND_DIR = Path(__file__).resolve().parent
+DATABASE_PATH = str(BACKEND_DIR / "socialflow.db")
 
 
 def init_asset_tables():
@@ -100,26 +101,58 @@ def register_asset(
     campaign: str = "",
     topic: str = "",
     tags: List[str] = None,
-    metadata: dict = None
+    metadata: dict = None,
+    sha256: str = None,
+    origin: str = "generated",
+    provider: str = None,
+    cost_usd: float = None,
+    thumb_path: str = None,
+    parent_asset_id: str = None
 ) -> dict:
-    """Register a new asset in the inventory"""
+    """Register a new asset in the inventory.
+
+    sha256/origin/provider/cost_usd/thumb_path/parent_asset_id are added by
+    migrations.py; they are written defensively so this still works against a
+    database that has not been migrated yet.
+    """
     asset_id = f"asset-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{os.urandom(3).hex()}"
 
     conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
 
-    c.execute('''INSERT INTO assets
-        (asset_id, asset_type, source, title, description, file_path, file_url,
-         file_size, duration_seconds, aspect_ratio, campaign, topic, tags, metadata)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-        (
-            asset_id, asset_type, source, title, description,
-            file_path, file_url, file_size, duration_seconds, aspect_ratio,
-            campaign, topic,
-            json.dumps(tags or []),
-            json.dumps(metadata or {})
-        )
-    )
+    cols = {
+        "asset_id": asset_id,
+        "asset_type": asset_type,
+        "source": source,
+        "title": title,
+        "description": description,
+        "file_path": file_path,
+        "file_url": file_url,
+        "file_size": file_size,
+        "duration_seconds": duration_seconds,
+        "aspect_ratio": aspect_ratio,
+        "campaign": campaign,
+        "topic": topic,
+        "tags": json.dumps(tags or []),
+        "metadata": json.dumps(metadata or {}),
+    }
+
+    # Only write the newer columns if this database actually has them.
+    present = {r[1] for r in c.execute("PRAGMA table_info(assets)")}
+    for key, value in (
+        ("sha256", sha256),
+        ("origin", origin),
+        ("provider", provider),
+        ("cost_usd", cost_usd),
+        ("thumb_path", thumb_path),
+        ("parent_asset_id", parent_asset_id),
+    ):
+        if key in present:
+            cols[key] = value
+
+    names = ", ".join(cols)
+    holes = ", ".join("?" for _ in cols)
+    c.execute(f"INSERT INTO assets ({names}) VALUES ({holes})", tuple(cols.values()))
 
     conn.commit()
     conn.close()
@@ -128,8 +161,67 @@ def register_asset(
         "asset_id": asset_id,
         "asset_type": asset_type,
         "source": source,
-        "title": title
+        "title": title,
+        "origin": origin,
+        "sha256": sha256,
     }
+
+
+def get_asset_by_sha256(sha256: str) -> Optional[dict]:
+    """Find an already-stored asset by content hash (deduplication)."""
+    if not sha256:
+        return None
+    conn = sqlite3.connect(DATABASE_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        if "sha256" not in {r[1] for r in conn.execute("PRAGMA table_info(assets)")}:
+            return None
+        row = conn.execute(
+            "SELECT * FROM assets WHERE sha256 = ? AND state != 'deleted' "
+            "ORDER BY id LIMIT 1",
+            (sha256,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def archive_asset(asset_id: str) -> bool:
+    """Soft delete — the row and the file both stay, the asset stops listing."""
+    conn = sqlite3.connect(DATABASE_PATH)
+    try:
+        cur = conn.execute(
+            "UPDATE assets SET state = 'archived', updated_at = CURRENT_TIMESTAMP "
+            "WHERE asset_id = ?",
+            (asset_id,),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def update_asset(asset_id: str, **fields) -> Optional[dict]:
+    """Update editable metadata (title, description, campaign, topic, tags, state)."""
+    allowed = {"title", "description", "campaign", "topic", "tags", "state"}
+    sets, params = [], []
+    for key, value in fields.items():
+        if key not in allowed or value is None:
+            continue
+        sets.append(f"{key} = ?")
+        params.append(json.dumps(value) if key == "tags" else value)
+    if not sets:
+        return get_asset(asset_id)
+
+    sets.append("updated_at = CURRENT_TIMESTAMP")
+    params.append(asset_id)
+    conn = sqlite3.connect(DATABASE_PATH)
+    try:
+        conn.execute(f"UPDATE assets SET {', '.join(sets)} WHERE asset_id = ?", params)
+        conn.commit()
+    finally:
+        conn.close()
+    return get_asset(asset_id)
 
 
 def get_asset(asset_id: str) -> Optional[dict]:
@@ -148,15 +240,30 @@ def list_assets(
     asset_type: str = None,
     source: str = None,
     campaign: str = None,
-    limit: int = 50
+    limit: int = 50,
+    origin: str = None,
+    topic: str = None,
+    tag: str = None,
+    q: str = None,
+    offset: int = 0,
+    include_archived: bool = False
 ) -> List[dict]:
+    """List assets, newest first.
+
+    Archived assets are hidden unless include_archived is set — the media
+    library should not show what the user removed, but the row and the file
+    both survive so any post already referencing it still resolves.
+    """
     conn = sqlite3.connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
+    present = {r[1] for r in c.execute("PRAGMA table_info(assets)")}
 
     query = "SELECT * FROM assets WHERE 1=1"
     params = []
 
+    if not include_archived:
+        query += " AND COALESCE(state, 'available') != 'archived'"
     if asset_type:
         query += " AND asset_type = ?"
         params.append(asset_type)
@@ -166,14 +273,35 @@ def list_assets(
     if campaign:
         query += " AND campaign = ?"
         params.append(campaign)
+    if topic:
+        query += " AND topic = ?"
+        params.append(topic)
+    if origin and "origin" in present:
+        query += " AND origin = ?"
+        params.append(origin)
+    if tag:
+        # tags is a JSON array; match the quoted token so "ai" does not hit "email"
+        query += " AND tags LIKE ?"
+        params.append(f'%"{tag}"%')
+    if q:
+        query += " AND (title LIKE ? OR description LIKE ? OR topic LIKE ?)"
+        like = f"%{q}%"
+        params.extend([like, like, like])
 
-    query += " ORDER BY created_at DESC LIMIT ?"
-    params.append(limit)
+    query += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+    params.extend([limit, max(0, offset)])
 
     c.execute(query, params)
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
+
+
+def count_assets(**filters) -> int:
+    """How many assets match — same filters as list_assets, ignoring paging."""
+    filters.pop("limit", None)
+    filters.pop("offset", None)
+    return len(list_assets(limit=100000, **filters))
 
 
 # ─── CONTENT QUEUE CRUD ──────────────────────────────────────
