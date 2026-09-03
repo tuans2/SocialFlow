@@ -202,14 +202,26 @@ def archive_asset(asset_id: str) -> bool:
 
 
 def update_asset(asset_id: str, **fields) -> Optional[dict]:
-    """Update editable metadata (title, description, campaign, topic, tags, state)."""
-    allowed = {"title", "description", "campaign", "topic", "tags", "state"}
+    """Update editable fields (title, description, campaign, topic, tags, state,
+    metadata). `metadata` is MERGED into what is already there, not replaced —
+    callers add a key without having to read the whole blob first."""
+    allowed = {"title", "description", "campaign", "topic", "tags", "state", "metadata"}
     sets, params = [], []
+
+    if fields.get("metadata"):
+        current = get_asset(asset_id) or {}
+        try:
+            merged = json.loads(current.get("metadata") or "{}")
+        except (TypeError, ValueError):
+            merged = {}
+        merged.update(fields["metadata"])
+        fields = dict(fields, metadata=merged)
+
     for key, value in fields.items():
         if key not in allowed or value is None:
             continue
         sets.append(f"{key} = ?")
-        params.append(json.dumps(value) if key == "tags" else value)
+        params.append(json.dumps(value) if key in ("tags", "metadata") else value)
     if not sets:
         return get_asset(asset_id)
 

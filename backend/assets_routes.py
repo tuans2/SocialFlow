@@ -7,6 +7,10 @@ regenerated. Backed by the assets table that already existed in
 asset_inventory.py but had nothing writing to it.
 """
 
+import json
+import sqlite3
+from datetime import datetime
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
@@ -19,11 +23,31 @@ from asset_inventory import (
     list_assets,
     update_asset,
 )
-from media_store import MediaRejected, public_url, store_upload
+from media_store import BACKEND_DIR, MediaRejected, public_url, store_upload
+from media_utils import resolve_media_path, validate_publish_media
 
 router = APIRouter(prefix="/api/assets", tags=["Media Library"])
 
 MAX_FILES_PER_REQUEST = 20
+
+
+DATABASE_PATH = str(BACKEND_DIR / "socialflow.db")
+
+# What an asset becomes when it is turned into a post. A video is a reel, a
+# picture is a post, a carousel is a carousel — chosen here so the caller does
+# not have to know, and so the publish gate sees the right content type.
+CONTENT_TYPE_FOR = {
+    "video": "reel",
+    "image": "post",
+    "carousel": "carousel",
+}
+
+
+class AssetToPost(BaseModel):
+    platform: str
+    content: str = ""
+    content_type: Optional[str] = None      # override the mapping above
+    scheduled_time: Optional[datetime] = None
 
 
 class AssetUpdate(BaseModel):
@@ -153,3 +177,117 @@ async def remove_asset(asset_id: str):
         raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
     archive_asset(asset_id)
     return {"success": True, "asset_id": asset_id, "state": "archived"}
+
+
+def _carousel_slide_paths(carousel_asset_id: str) -> List[str]:
+    """Slides of a carousel, in order, as stored paths.
+
+    Reads the ordered id list the carousel keeps, which survives
+    deduplication, and falls back to the parent_asset_id back-pointer for
+    carousels made before that list existed.
+    """
+    carousel = get_asset(carousel_asset_id)
+    if carousel:
+        try:
+            meta = json.loads(carousel.get("metadata") or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+        ids = meta.get("slide_asset_ids") or []
+        if ids:
+            paths = []
+            for i in ids:
+                a = get_asset(i)
+                if a and a.get("file_path"):
+                    paths.append(a["file_path"])
+            if paths:
+                return paths
+
+    conn = sqlite3.connect(DATABASE_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT file_path FROM assets WHERE parent_asset_id = ? "
+            "AND asset_type = 'image' ORDER BY id",
+            (carousel_asset_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [r["file_path"] for r in rows if r["file_path"]]
+
+
+@router.post("/{asset_id}/to-post")
+async def asset_to_post(asset_id: str, payload: AssetToPost):
+    """Turn an asset into a draft post.
+
+    This is the step that was missing: video generated in the app landed in the
+    library and stopped there, because nothing connected an asset to the posts
+    table. Generate -> look -> lose.
+
+    The media is validated against the same publish gate the publisher uses, so
+    a draft that cannot be published is refused here rather than at 11pm when
+    the scheduler tries it.
+    """
+    asset = get_asset(asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
+
+    content_type = payload.content_type or CONTENT_TYPE_FOR.get(
+        asset.get("asset_type"), "post"
+    )
+
+    if asset.get("asset_type") == "carousel":
+        media = _carousel_slide_paths(asset_id)
+        if not media:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Carousel {asset_id} has no slides to post",
+            )
+    else:
+        if not asset.get("file_path"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Asset {asset_id} has no file to post",
+            )
+        media = [asset["file_path"]]
+
+    missing = [m for m in media if not resolve_media_path(m)]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File missing on disk: {', '.join(missing[:3])}",
+        )
+
+    ok, gate_error, _ = validate_publish_media(payload.platform, content_type, media)
+    if not ok:
+        raise HTTPException(status_code=400, detail=gate_error)
+
+    status = "scheduled" if payload.scheduled_time else "draft"
+    conn = sqlite3.connect(DATABASE_PATH)
+    try:
+        cur = conn.execute(
+            """INSERT INTO posts (platform, content_type, content, media_paths,
+                                  scheduled_time, status)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                payload.platform,
+                content_type,
+                payload.content or asset.get("title") or "",
+                json.dumps(media),
+                payload.scheduled_time.isoformat() if payload.scheduled_time else None,
+                status,
+            ),
+        )
+        post_id = cur.lastrowid
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {
+        "success": True,
+        "post_id": post_id,
+        "status": status,
+        "platform": payload.platform,
+        "content_type": content_type,
+        "media_count": len(media),
+        "asset_id": asset_id,
+    }

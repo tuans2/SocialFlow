@@ -1344,6 +1344,13 @@ Do NOT include any text in the image."""
         carousel_asset_id,
         description=(carousel_data.get("caption", "") or "")[:500],
         state="available" if len(ok_slides) == len(generated_images) else "partial",
+        # The carousel owns its slide list. parent_asset_id alone cannot: when
+        # a generated image is byte-identical to one already stored, the media
+        # store reuses that asset — and its parent still points at the FIRST
+        # carousel that produced it. The slide would silently vanish from this
+        # one while the response still claimed it. An ordered list here is
+        # authoritative and unaffected by deduplication.
+        metadata={"slide_asset_ids": [g["asset_id"] for g in ok_slides]},
     )
 
     return {
@@ -1398,21 +1405,42 @@ async def _read_local_image(image_url: str) -> tuple:
     raise HTTPException(status_code=400, detail=f"Could not read image: {image_url}")
 
 
-def _slides_of_carousel(carousel_asset_id: str) -> List[str]:
-    """Every slide of a carousel, in order, as absolute file paths."""
+def _carousel_slide_records(carousel_asset_id: str) -> List[dict]:
+    """Slide assets of a carousel, in order.
+
+    Prefers the ordered id list stored on the carousel, which survives
+    deduplication; falls back to the parent_asset_id back-pointer for
+    carousels created before that list existed.
+    """
+    carousel = get_asset(carousel_asset_id)
+    if carousel:
+        try:
+            meta = json.loads(carousel.get("metadata") or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+        ids = meta.get("slide_asset_ids") or []
+        if ids:
+            found = [get_asset(i) for i in ids]
+            return [f for f in found if f]
+
     conn = sqlite3.connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            "SELECT file_path FROM assets WHERE parent_asset_id = ? "
+            "SELECT * FROM assets WHERE parent_asset_id = ? "
             "AND asset_type = 'image' ORDER BY id",
             (carousel_asset_id,),
         ).fetchall()
     finally:
         conn.close()
+    return [dict(r) for r in rows]
+
+
+def _slides_of_carousel(carousel_asset_id: str) -> List[str]:
+    """Every slide of a carousel, in order, as absolute file paths."""
     resolved = []
-    for row in rows:
-        path = resolve_media_path(row["file_path"])
+    for row in _carousel_slide_records(carousel_asset_id):
+        path = resolve_media_path(row.get("file_path"))
         if path:
             resolved.append(path)
     return resolved

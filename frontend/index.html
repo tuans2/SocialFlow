@@ -1810,11 +1810,18 @@
                                         ) : videoStatus?.status === 'completed' || videoStatus?.video_url ? (
                                             <div>
                                                 <p style={{ color: 'var(--success)', marginBottom: '10px' }}>✅ Video Ready!</p>
-                                                <video 
-                                                    src={videoStatus.video_url} 
-                                                    controls 
+                                                <video
+                                                    src={videoStatus.video_url}
+                                                    controls
                                                     style={{ width: '100%', borderRadius: '8px', maxHeight: '400px' }}
                                                 />
+                                                {videoStatus.asset_id && (
+                                                    <SaveVideoAsPost
+                                                        assetId={videoStatus.asset_id}
+                                                        defaultPlatform={platform}
+                                                        defaultCaption={(result && result.script && result.script.caption) || topic || ''}
+                                                        onSaved={onCreated} />
+                                                )}
                                             </div>
                                         ) : videoStatus?.status === 'failed' ? (
                                             <p style={{ color: 'var(--danger)' }}>❌ Generation failed</p>
@@ -2248,6 +2255,13 @@
                                             <div>
                                                 <p style={{ color: 'var(--success)', marginBottom: '12px', textAlign: 'center' }}>✅ Avatar Ready!</p>
                                                 <video src={videoStatus.video_url} controls style={{ width: '100%', borderRadius: '12px' }} />
+                                                {videoStatus.asset_id && (
+                                                    <SaveVideoAsPost
+                                                        assetId={videoStatus.asset_id}
+                                                        defaultPlatform="instagram"
+                                                        defaultCaption={script || topic || ''}
+                                                        onSaved={onCreated} />
+                                                )}
                                             </div>
                                         ) : videoStatus?.status === 'failed' ? (
                                             <p style={{ color: 'var(--danger)', textAlign: 'center' }}>❌ Generation failed. Try again.</p>
@@ -2468,6 +2482,73 @@
                             </div>
                         )}
                     </div>
+                </div>
+            );
+        }
+
+        // Turns a finished video into a draft post. Until this existed the
+        // pipeline stopped at the library: generate, watch, lose. The backend
+        // runs the same publish gate here, so a draft that could never be
+        // published is refused now rather than at 11pm by the scheduler.
+        function SaveVideoAsPost({ assetId, defaultCaption, defaultPlatform, onSaved }) {
+            const [caption, setCaption] = useState(defaultCaption || '');
+            const [platform, setPlatform] = useState(defaultPlatform || 'instagram');
+            const [saving, setSaving] = useState(false);
+            const [saved, setSaved] = useState(null);
+            const [error, setError] = useState('');
+
+            useEffect(() => { setCaption(defaultCaption || ''); }, [defaultCaption]);
+
+            const save = async () => {
+                setSaving(true); setError(''); setSaved(null);
+                try {
+                    const res = await api.post(`/assets/${assetId}/to-post`, {
+                        platform, content: caption
+                    });
+                    if (res.success) {
+                        setSaved(res);
+                        if (onSaved) onSaved(res);
+                    } else {
+                        setError(res.detail || res.error || 'Could not save');
+                    }
+                } catch (e) {
+                    setError(String(e));
+                }
+                setSaving(false);
+            };
+
+            if (saved) {
+                return (
+                    <div style={{ marginTop: '14px', padding: '12px', borderRadius: '10px',
+                                  background: 'rgba(16,185,129,.1)', border: '1px solid rgba(16,185,129,.35)',
+                                  fontSize: '13px' }}>
+                        ✅ Saved as draft #{saved.post_id} for {saved.platform}
+                        <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                            Find it under All Posts to schedule or publish it.
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div style={{ marginTop: '14px', borderTop: '1px solid var(--border)', paddingTop: '14px' }}>
+                    <div className="form-label">Save as draft</div>
+                    <div className="platform-pills" style={{ marginBottom: '10px' }}>
+                        {['instagram', 'tiktok', 'facebook'].map(pf => (
+                            <button key={pf} className={`platform-pill ${platform === pf ? 'active ' + pf : ''}`}
+                                    onClick={() => setPlatform(pf)}>
+                                {icons[pf] || ''} {pf}
+                            </button>
+                        ))}
+                    </div>
+                    <textarea className="form-textarea" placeholder="Caption…" value={caption}
+                              onChange={e => setCaption(e.target.value)}
+                              style={{ minHeight: '70px', marginBottom: '10px' }} />
+                    <button className="btn btn-primary" onClick={save} disabled={saving || !assetId}
+                            style={{ width: '100%' }}>
+                        {saving ? <><div className="spinner" /> Saving…</> : '💾 Save as draft'}
+                    </button>
+                    {error && <div className="reject-note">{error}</div>}
                 </div>
             );
         }

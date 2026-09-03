@@ -72,14 +72,17 @@ check("fb post, 1 image -> ALLOWED (unchanged)", ok, True)
 ok, _, _ = V("instagram", "post", ["uploads/one.png"])
 check("ig post, 1 image -> ALLOWED (unchanged)", ok, True)
 
-# No regression: ungated platforms/types still pass through
+# Ungated combinations still pass through.
+# carousel (on non-FB/IG platforms) and reel used to be asserted here as
+# allowed. They were moved out deliberately when the policy changed from
+# "which platform is this" to "what is this content" — a carousel is images
+# and a reel is video wherever they are posted. Plain posts stay
+# platform-dependent, which is what this block still guards.
 for plat in ["linkedin", "twitter", "x", "zalo", "tiktok"]:
     ok, _, _ = V(plat, "post", None)
     check(f"{plat} post, no image -> ALLOWED (unchanged)", ok, True)
-    ok, _, _ = V(plat, "carousel", None)
-    check(f"{plat} carousel, no media -> ALLOWED (unchanged)", ok, True)
 
-for ct in ["reel", "thread", "ai-news", "repo-promo"]:
+for ct in ["thread", "ai-news", "repo-promo"]:
     ok, _, _ = V("facebook", ct, None)
     check(f"fb {ct}, no media -> ALLOWED (unchanged)", ok, True)
 
@@ -88,7 +91,10 @@ check("requires_image(fb, post) still True", m.requires_image("facebook", "post"
 check("requires_image(fb, carousel) still False", m.requires_image("facebook", "carousel"), False)
 check("requires_image(fb, reel) still False", m.requires_image("facebook", "reel"), False)
 check("requires_media(fb, carousel) now True", m.requires_media("facebook", "carousel"), True)
-check("requires_media(linkedin, carousel) False", m.requires_media("linkedin", "carousel"), False)
+check("requires_media(linkedin, carousel) True — carousels are images anywhere",
+      m.requires_media("linkedin", "carousel"), True)
+check("requires_media(linkedin, post) False — plain posts stay platform-dependent",
+      m.requires_media("linkedin", "post"), False)
 
 # Backwards-compat alias kept
 check("IMAGE_REQUIRED_CONTENT_TYPES alias intact", m.IMAGE_REQUIRED_CONTENT_TYPES, {"post"})
@@ -96,6 +102,40 @@ check("IMAGE_REQUIRED_CONTENT_TYPES alias intact", m.IMAGE_REQUIRED_CONTENT_TYPE
 # Case-insensitivity
 ok, _, _ = V("Facebook", "Carousel", None)
 check("case-insensitive platform/type -> BLOCKED", ok, False)
+
+# ── reels are video by nature, on every platform ──────────────────────────
+# A plain post needs a picture only where the platform demands one. A reel
+# needs its video everywhere: publishing one without the file posts a bare
+# caption to a surface built for video, on TikTok exactly as on Instagram.
+for plat in ["instagram", "facebook", "tiktok", "linkedin", "x", "youtube"]:
+    ok, err, _ = V(plat, "reel", None)
+    check(f"{plat} reel, no video -> BLOCKED", ok, False)
+    check(f"  {plat} message says video", "video" in (err or "").lower(), True)
+
+    ok, _, _ = V(plat, "carousel", None)
+    check(f"{plat} carousel, no media -> BLOCKED", ok, False)
+
+ok, _, media = V("tiktok", "reel", ["uploads/one.png"])
+check("reel with one real file -> ALLOWED", ok, True)
+check("  resolves it", len(media), 1)
+
+# a reel needs one file, not two — the carousel minimum must not leak
+ok, _, _ = V("instagram", "reel", ["uploads/one.png"])
+check("reel does not inherit the 2-slide carousel minimum", ok, True)
+
+ok, err, _ = V("instagram", "reel", ["uploads/gone.mp4"])
+check("reel pointing at a missing file -> BLOCKED", ok, False)
+check("  names the file", "gone.mp4" in (err or ""), True)
+
+# ── plain posts stay platform-dependent ───────────────────────────────────
+for plat in ["tiktok", "linkedin", "x", "zalo"]:
+    ok, _, _ = V(plat, "post", None)
+    check(f"{plat} post, no image -> still ALLOWED", ok, True)
+
+check("requires_media(tiktok, reel) True", m.requires_media("tiktok", "reel"), True)
+check("requires_media(tiktok, post) False", m.requires_media("tiktok", "post"), False)
+check("requires_image(fb, reel) still False — no auto image for reels",
+      m.requires_image("facebook", "reel"), False)
 
 print("=" * 60)
 for n, g, w in FAIL:

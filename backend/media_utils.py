@@ -25,23 +25,32 @@ UPLOADS_DIR = BACKEND_DIR / "uploads"
 #   OPTIONAL : linkedin, twitter/x, zalo, tiktok, ...
 IMAGE_REQUIRED_PLATFORMS = {"facebook", "instagram"}
 
-# Two DIFFERENT questions, deliberately kept apart:
+# Three DIFFERENT questions, deliberately kept apart:
 #
 #   AUTOGEN_IMAGE_CONTENT_TYPES -> "should /api/generate auto-create one post
 #       image for this?"  Only a single "post" qualifies. carousel has its own
 #       slide pipeline, reel has the video pipeline, thread stays text-only.
 #
-#   MEDIA_REQUIRED_CONTENT_TYPES -> "should publish be BLOCKED when the media
-#       is missing?"  A carousel without slides is as broken as a post without
-#       an image, so it is gated too — even though nothing auto-generates it.
+#   PLATFORM_MEDIA_CONTENT_TYPES -> content whose media requirement depends on
+#       WHERE it goes. A plain post needs a picture on Facebook and Instagram
+#       and nowhere else.
+#
+#   INHERENT_MEDIA_CONTENT_TYPES -> content that IS its media, wherever it
+#       goes. A reel is a video and a carousel is a set of images by
+#       definition; publishing either without the files posts a bare caption
+#       to a surface built for the media. Platform does not enter into it.
 AUTOGEN_IMAGE_CONTENT_TYPES = {"post"}
-MEDIA_REQUIRED_CONTENT_TYPES = {"post", "carousel"}
+PLATFORM_MEDIA_CONTENT_TYPES = {"post"}
+INHERENT_MEDIA_CONTENT_TYPES = {"carousel", "reel"}
+
+MEDIA_REQUIRED_CONTENT_TYPES = PLATFORM_MEDIA_CONTENT_TYPES | INHERENT_MEDIA_CONTENT_TYPES
 
 # Backwards-compatible alias (older imports referred to this name).
 IMAGE_REQUIRED_CONTENT_TYPES = AUTOGEN_IMAGE_CONTENT_TYPES
 
 # A carousel with one slide is not a carousel. Minimum media count per
-# content type; anything absent here needs at least one file.
+# content type; anything absent here needs at least one file — a reel is one
+# video, so it takes the default.
 MIN_MEDIA_COUNT = {"carousel": 2}
 
 PLATFORM_LABEL = {"facebook": "Facebook", "instagram": "Instagram"}
@@ -172,12 +181,17 @@ def requires_image(platform: str, content_type: str) -> bool:
 def requires_media(platform: str, content_type: str) -> bool:
     """Should publishing be blocked when the media is missing?
 
-    Wider than requires_image(): a carousel is gated even though nothing
-    auto-generates its slides.
+    Wider than requires_image() in two ways: a carousel is gated even though
+    nothing auto-generates its slides, and reels/carousels are gated on EVERY
+    platform rather than only the two that require pictures on plain posts —
+    a reel without a video is broken on TikTok exactly as it is on Instagram.
     """
+    kind = (content_type or "").lower()
+    if kind in INHERENT_MEDIA_CONTENT_TYPES:
+        return True
     return (
         (platform or "").lower() in IMAGE_REQUIRED_PLATFORMS
-        and (content_type or "").lower() in MEDIA_REQUIRED_CONTENT_TYPES
+        and kind in PLATFORM_MEDIA_CONTENT_TYPES
     )
 
 
@@ -207,7 +221,12 @@ def validate_publish_media(
     label = PLATFORM_LABEL.get((platform or "").lower(), (platform or "").title())
     kind = (content_type or "").lower() or "post"
     minimum = minimum_media_count(kind)
-    need = f"at least {minimum} slides" if minimum > 1 else "at least one image"
+    if minimum > 1:
+        need = f"at least {minimum} slides"
+    elif kind == "reel":
+        need = "a video"
+    else:
+        need = "at least one image"
 
     if not parse_media_paths(media_paths):
         return False, f"{label} {kind}s require {need}.", []
