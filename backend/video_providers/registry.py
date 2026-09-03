@@ -9,6 +9,7 @@ import os
 from typing import Dict, List, Optional
 
 from .base import ProviderError, VideoProvider
+from .slideshow import SlideshowProvider
 from .veo import VeoProvider
 
 _REGISTRY: Dict[str, VideoProvider] = {}
@@ -23,6 +24,10 @@ def _bootstrap():
     if _REGISTRY:
         return
     register(VeoProvider())
+    # Needs no account, key or billing — just ffmpeg. Registered
+    # unconditionally so it is always an option when a paid provider is
+    # unavailable; is_configured() reports whether ffmpeg is actually there.
+    register(SlideshowProvider())
     # Kling is registered only when a key exists: the integration in main.py
     # predates this abstraction, was never verified against the live API, and
     # should not be offered as a working option just because the file is there.
@@ -74,4 +79,5 @@ def _configuration_hint(name: str) -> str:
     return {
         "veo": "Add GEMINI_API_KEY to .env — the same key text generation uses.",
         "kling": "Add KLING_API_KEY to .env.",
+        "slideshow": "Install ffmpeg — on macOS: brew install ffmpeg",
     }.get(name, "Check the provider's credentials in .env.")

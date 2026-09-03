@@ -29,7 +29,7 @@ from automation import get_automation, LinkedInAutomation, InstagramAutomation, 
 from automation_extended import get_automation_extended
 from openclaw_bridge import router as openclaw_router
 from heygen_routes import router as heygen_router
-from asset_inventory import init_asset_tables, register_asset, update_asset
+from asset_inventory import get_asset, init_asset_tables, register_asset, update_asset
 from assets_routes import router as assets_router
 from migrations import run_migrations
 from analytics_store import init_analytics_tables, register_analytics_routes
@@ -179,7 +179,12 @@ class VideoRequest(BaseModel):
     aspect_ratio: str = "9:16"  # 9:16 (vertical/reel), 16:9 (horizontal), 1:1 (square)
     mode: str = "std"  # std or pro
     platform: str = "instagram"  # instagram, tiktok, youtube
-    provider: Optional[str] = None  # veo | kling | ... ; None = configured default
+    provider: Optional[str] = None  # veo | slideshow | ... ; None = configured default
+    # Slideshow inputs. carousel_asset_id is the useful one: it turns a
+    # carousel already in the library into a vertical reel.
+    image_paths: Optional[List[str]] = None
+    carousel_asset_id: Optional[str] = None
+    audio_asset_id: Optional[str] = None
 
 
 class ReelRequest(BaseModel):
@@ -1387,6 +1392,61 @@ async def _read_local_image(image_url: str) -> tuple:
     raise HTTPException(status_code=400, detail=f"Could not read image: {image_url}")
 
 
+def _slides_of_carousel(carousel_asset_id: str) -> List[str]:
+    """Every slide of a carousel, in order, as absolute file paths."""
+    conn = sqlite3.connect(DATABASE_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT file_path FROM assets WHERE parent_asset_id = ? "
+            "AND asset_type = 'image' ORDER BY id",
+            (carousel_asset_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    resolved = []
+    for row in rows:
+        path = resolve_media_path(row["file_path"])
+        if path:
+            resolved.append(path)
+    return resolved
+
+
+def _asset_file(asset_id: str) -> Optional[str]:
+    row = get_asset(asset_id) if asset_id else None
+    return resolve_media_path(row["file_path"]) if row and row.get("file_path") else None
+
+
+def _slideshow_inputs(request) -> dict:
+    """Turn library references into the file paths the renderer needs."""
+    images: List[str] = []
+
+    if getattr(request, "carousel_asset_id", None):
+        images = _slides_of_carousel(request.carousel_asset_id)
+        if not images:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Carousel {request.carousel_asset_id} has no slides on disk",
+            )
+
+    for ref in (getattr(request, "image_paths", None) or []):
+        path = _asset_file(ref) if str(ref).startswith("asset-") else resolve_media_path(ref)
+        if not path:
+            raise HTTPException(status_code=400, detail=f"Image not found: {ref}")
+        images.append(path)
+
+    audio = None
+    if getattr(request, "audio_asset_id", None):
+        audio = _asset_file(request.audio_asset_id)
+        if not audio:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Audio asset {request.audio_asset_id} not found",
+            )
+
+    return {"image_paths": images, "audio_path": audio}
+
+
 @app.post("/api/generate-video")
 async def generate_video(request: VideoRequest, background_tasks: BackgroundTasks = None):
     """Start a video generation on the configured provider."""
@@ -1407,12 +1467,15 @@ async def generate_video(request: VideoRequest, background_tasks: BackgroundTask
                 )
             image_bytes, image_mime = await _read_local_image(request.image_url)
 
+        extras = _slideshow_inputs(request) if provider.name == "slideshow" else {}
+
         job = await provider.submit(
             request.prompt,
             duration=request.duration,
             aspect_ratio=request.aspect_ratio,
             image_bytes=image_bytes,
             image_mime=image_mime or "image/png",
+            **extras,
         )
 
         duration = job.raw.get("duration", provider.normalise_duration(request.duration))
@@ -1422,7 +1485,9 @@ async def generate_video(request: VideoRequest, background_tasks: BackgroundTask
             params={"aspect_ratio": job.raw.get("aspect_ratio"),
                     "duration": duration,
                     "platform": request.platform,
-                    "model": job.raw.get("model")},
+                    "model": job.raw.get("model"),
+                    "slides": job.raw.get("slides"),
+                    "has_audio": job.raw.get("has_audio")},
             cost_usd=provider.estimated_cost(duration),
         )
 

@@ -7,3 +7,4 @@ __all__ = [
     "JobStatus", "ProviderError", "VideoJob", "VideoProvider",
     "available", "default_name", "get", "get_optional", "register",
 ]
+

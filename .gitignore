@@ -38,3 +38,6 @@ backend/debug_ig_*.png
 backend/facebook_*.png
 backend/*.instagram_backup
 _to_delete/
+
+# ffmpeg scratch renders (copied into uploads/, then swept)
+backend/.render/

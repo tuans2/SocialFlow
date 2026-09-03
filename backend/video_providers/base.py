@@ -106,9 +106,15 @@ class VideoProvider(ABC):
         return aspect_ratio if aspect_ratio in self.aspect_ratios else self.aspect_ratios[0]
 
     def estimated_cost(self, duration: int) -> Optional[float]:
-        """USD for a clip of this length, when the rate is configured."""
+        """USD for a clip of this length, when the rate is known.
+
+        `is not None`, not a truthiness test: a local renderer has a rate of
+        0.0, and `if rate` would report that as "cost unknown" — the one
+        answer guaranteed to make someone hesitate over something free.
+        None still means genuinely unknown (no rate configured).
+        """
         rate = getattr(self, "cost_per_second", None)
-        return round(rate * duration, 4) if rate else None
+        return round(rate * duration, 4) if rate is not None else None
 
     def describe(self) -> dict:
         return {

@@ -96,6 +96,12 @@ check("cost is None without a rate", VeoProvider(api_key="k").estimated_cost(8),
 check("cost computed with a rate",
       VeoProvider(api_key="k", cost_per_second=0.15).estimated_cost(8), 1.2)
 
+from video_providers.slideshow import SlideshowProvider  # noqa: E402
+check("a free provider reports 0.0, not None",
+      SlideshowProvider().estimated_cost(15), 0.0)
+check("  zero is not treated as unknown",
+      SlideshowProvider().estimated_cost(15) is None, False)
+
 # ── configuration is read lazily, so Settings edits take effect ───────────
 os.environ.pop("GEMINI_API_KEY", None)
 lazy = VeoProvider()
