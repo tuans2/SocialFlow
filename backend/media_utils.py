@@ -5,7 +5,8 @@ Single source of truth for two things:
   1. Turning whatever is stored in `posts.media_paths` (browser URL like
      "/uploads/foo.png", relative "uploads/foo.png", or an absolute filesystem
      path) into a real filesystem path Playwright can hand to an <input type=file>.
-  2. Enforcing the platform image policy BEFORE any browser automation starts.
+  2. Enforcing the platform media policy BEFORE any browser automation starts:
+     single posts need an image, carousels need at least two real slides.
 
 No new image engine, no new storage, no new routes — this only reads what the
 existing pipeline already produces in backend/uploads/.
@@ -24,9 +25,24 @@ UPLOADS_DIR = BACKEND_DIR / "uploads"
 #   OPTIONAL : linkedin, twitter/x, zalo, tiktok, ...
 IMAGE_REQUIRED_PLATFORMS = {"facebook", "instagram"}
 
-# Only single "post" content is gated. carousel / reel / thread keep their own
-# existing pipelines untouched.
-IMAGE_REQUIRED_CONTENT_TYPES = {"post"}
+# Two DIFFERENT questions, deliberately kept apart:
+#
+#   AUTOGEN_IMAGE_CONTENT_TYPES -> "should /api/generate auto-create one post
+#       image for this?"  Only a single "post" qualifies. carousel has its own
+#       slide pipeline, reel has the video pipeline, thread stays text-only.
+#
+#   MEDIA_REQUIRED_CONTENT_TYPES -> "should publish be BLOCKED when the media
+#       is missing?"  A carousel without slides is as broken as a post without
+#       an image, so it is gated too — even though nothing auto-generates it.
+AUTOGEN_IMAGE_CONTENT_TYPES = {"post"}
+MEDIA_REQUIRED_CONTENT_TYPES = {"post", "carousel"}
+
+# Backwards-compatible alias (older imports referred to this name).
+IMAGE_REQUIRED_CONTENT_TYPES = AUTOGEN_IMAGE_CONTENT_TYPES
+
+# A carousel with one slide is not a carousel. Minimum media count per
+# content type; anything absent here needs at least one file.
+MIN_MEDIA_COUNT = {"carousel": 2}
 
 PLATFORM_LABEL = {"facebook": "Facebook", "instagram": "Instagram"}
 
@@ -126,10 +142,30 @@ def to_public_url(path: Any) -> Optional[str]:
 
 
 def requires_image(platform: str, content_type: str) -> bool:
+    """Should the generator auto-create a post image for this combination?
+
+    Used by /api/generate. NOT the publish gate — see requires_media().
+    """
     return (
         (platform or "").lower() in IMAGE_REQUIRED_PLATFORMS
-        and (content_type or "").lower() in IMAGE_REQUIRED_CONTENT_TYPES
+        and (content_type or "").lower() in AUTOGEN_IMAGE_CONTENT_TYPES
     )
+
+
+def requires_media(platform: str, content_type: str) -> bool:
+    """Should publishing be blocked when the media is missing?
+
+    Wider than requires_image(): a carousel is gated even though nothing
+    auto-generates its slides.
+    """
+    return (
+        (platform or "").lower() in IMAGE_REQUIRED_PLATFORMS
+        and (content_type or "").lower() in MEDIA_REQUIRED_CONTENT_TYPES
+    )
+
+
+def minimum_media_count(content_type: str) -> int:
+    return MIN_MEDIA_COUNT.get((content_type or "").lower(), 1)
 
 
 def validate_publish_media(
@@ -148,20 +184,29 @@ def validate_publish_media(
     """
     existing, missing = resolve_media_paths(media_paths)
 
-    if not requires_image(platform, content_type):
+    if not requires_media(platform, content_type):
         return True, None, existing
 
     label = PLATFORM_LABEL.get((platform or "").lower(), (platform or "").title())
+    kind = (content_type or "").lower() or "post"
+    minimum = minimum_media_count(kind)
+    need = f"at least {minimum} slides" if minimum > 1 else "at least one image"
 
     if not parse_media_paths(media_paths):
-        return False, f"{label} posts require at least one image.", []
+        return False, f"{label} {kind}s require {need}.", []
 
     if not existing:
         return (
             False,
-            f"{label} posts require at least one image. "
-            f"Image file not found: {', '.join(missing) or 'unknown path'}",
+            f"{label} {kind}s require {need}. "
+            f"Media file not found: {', '.join(missing) or 'unknown path'}",
             [],
         )
+
+    if len(existing) < minimum:
+        detail = f"only {len(existing)} usable file(s) found"
+        if missing:
+            detail += f"; missing: {', '.join(missing)}"
+        return False, f"{label} {kind}s require {need} — {detail}.", []
 
     return True, None, existing
