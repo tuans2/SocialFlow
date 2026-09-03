@@ -34,6 +34,7 @@ node_modules/
 
 # Debug screenshots (Playwright troubleshooting)
 backend/debug_fb_*.png
+backend/debug_ig_*.png
 backend/facebook_*.png
 backend/*.instagram_backup
 _to_delete/

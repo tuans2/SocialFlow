@@ -329,62 +329,154 @@ class InstagramAutomation(SocialAutomation):
                 pass
         return False
     
+    # The composer is a modal; every step below is "find one of several
+    # candidates" because Instagram renames labels often. Each stage reports a
+    # distinct failure so a broken run says WHICH step broke, not just "timeout".
+    CREATE_BUTTON_SELECTORS = [
+        'svg[aria-label="New post"]',
+        'svg[aria-label="New Post"]',
+        'a[href="/create/select/"]',
+        'div[role="button"]:has(svg[aria-label*="New post" i])',
+        'span:has-text("Create")',
+    ]
+    SELECT_FROM_COMPUTER_SELECTORS = [
+        'button:has-text("Select from computer")',
+        'button:has-text("Select From Computer")',
+        'div[role="button"]:has-text("Select from computer")',
+    ]
+    CAPTION_SELECTORS = [
+        'textarea[aria-label*="caption" i]',
+        'textarea[placeholder*="caption" i]',
+        'div[role="textbox"][aria-label*="caption" i]',
+        'div[contenteditable="true"][aria-label*="caption" i]',
+        'textarea',
+    ]
+
+    async def _click_first(self, selectors, timeout=8000):
+        """Click the first selector that resolves. Returns True on success."""
+        for sel in selectors:
+            try:
+                el = await self.page.wait_for_selector(sel, timeout=timeout, state="visible")
+                if el:
+                    await el.click()
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _debug_shot(self, tag: str):
+        """Best-effort screenshot so a failed run is diagnosable afterwards."""
+        try:
+            path = Path(__file__).resolve().parent / f"debug_ig_{tag}.png"
+            await self.page.screenshot(path=str(path))
+            return str(path)
+        except Exception:
+            return None
+
     async def post(self, content: str, image_paths: List[str]) -> dict:
         """Create a post on Instagram (requires at least one image)"""
         if not image_paths:
             return {"success": False, "message": "Instagram requires at least one image"}
-        
+
         await self.init_browser()
-        
+
         if not await self.load_session(self.PLATFORM):
             return {"success": False, "message": "Not logged in"}
-        
+
+        stage = "start"
+        caption_input = None
         try:
+            stage = "open home"
             await self.page.goto(self.HOME_URL)
             await self.page.wait_for_load_state("networkidle")
             await self.page.wait_for_timeout(2000)
-            
-            # Click create post button (+ icon)
-            create_btn = await self.page.wait_for_selector(
-                'svg[aria-label="New post"], a[href="/create/select/"], span:has-text("Create")',
-                timeout=10000
-            )
-            await create_btn.click()
+
+            if "login" in self.page.url:
+                return {
+                    "success": False,
+                    "message": "Instagram session expired - re-run manual_login.py for instagram",
+                }
+
+            stage = "open composer"
+            if not await self._click_first(self.CREATE_BUTTON_SELECTORS, timeout=10000):
+                shot = await self._debug_shot("1_no_create_button")
+                return {
+                    "success": False,
+                    "message": f"Could not find the 'New post' button (screenshot: {shot})",
+                }
             await self.page.wait_for_timeout(1500)
-            
-            # Upload image
-            file_input = await self.page.wait_for_selector('input[type="file"]', timeout=10000)
+
+            # The dialog sometimes needs "Select from computer" clicked before the
+            # hidden <input type=file> is attached. Optional - ignore if already there.
+            await self._click_first(self.SELECT_FROM_COMPUTER_SELECTORS, timeout=3000)
+
+            stage = "attach files"
+            # THE BUG THIS REPLACES: wait_for_selector() defaults to state="visible",
+            # but Instagram's file input is display:none - it is never visible, so
+            # the old code always timed out here. Wait for "attached" instead.
+            file_input = await self.page.wait_for_selector(
+                'input[type="file"]', timeout=15000, state="attached"
+            )
             await file_input.set_input_files(image_paths)
             await self.page.wait_for_timeout(3000)
-            
-            # Click through the editing steps
-            # Next button (crop screen)
-            next_btn = await self.page.wait_for_selector('button:has-text("Next"), div[role="button"]:has-text("Next")')
-            await next_btn.click()
-            await self.page.wait_for_timeout(1500)
-            
-            # Next button (filters screen)
-            next_btn = await self.page.wait_for_selector('button:has-text("Next"), div[role="button"]:has-text("Next")')
-            await next_btn.click()
-            await self.page.wait_for_timeout(1500)
-            
-            # Add caption
-            caption_input = await self.page.wait_for_selector('textarea[aria-label*="caption"], textarea[placeholder*="caption"]')
-            await caption_input.fill(content)
-            await self.page.wait_for_timeout(1000)
-            
-            # Share button
-            share_btn = await self.page.wait_for_selector('button:has-text("Share"), div[role="button"]:has-text("Share")')
-            await share_btn.click()
-            
-            # Wait for post to complete
-            await self.page.wait_for_timeout(5000)
-            
+
+            stage = "crop/filter steps"
+            next_selectors = [
+                'div[role="button"]:has-text("Next")',
+                'button:has-text("Next")',
+            ]
+            for _ in range(2):
+                if not await self._click_first(next_selectors, timeout=8000):
+                    break
+                await self.page.wait_for_timeout(1500)
+
+            stage = "caption"
+            for sel in self.CAPTION_SELECTORS:
+                try:
+                    caption_input = await self.page.wait_for_selector(
+                        sel, timeout=5000, state="visible"
+                    )
+                    if caption_input:
+                        break
+                except Exception:
+                    continue
+
+            if caption_input:
+                await caption_input.click()
+                await self.page.keyboard.type(content, delay=10)
+                await self.page.wait_for_timeout(1000)
+            else:
+                await self._debug_shot("2_no_caption_field")
+
+            stage = "share"
+            share_selectors = [
+                'div[role="button"]:has-text("Share")',
+                'button:has-text("Share")',
+            ]
+            if not await self._click_first(share_selectors, timeout=10000):
+                shot = await self._debug_shot("3_no_share_button")
+                return {
+                    "success": False,
+                    "message": f"Composer filled but the Share button was not found (screenshot: {shot})",
+                }
+
+            await self.page.wait_for_timeout(6000)
+
             await self.save_session(self.PLATFORM)
-            return {"success": True, "message": "Posted successfully to Instagram"}
-            
+            return {
+                "success": True,
+                "message": f"Posted successfully to Instagram ({len(image_paths)} image(s))",
+                "caption_set": bool(caption_input),
+            }
+
         except Exception as e:
-            return {"success": False, "message": f"Failed to post: {str(e)}"}
+            tag = stage.replace(" ", "_").replace("/", "_")
+            shot = await self._debug_shot(f"error_{tag}")
+            return {
+                "success": False,
+                "message": f"Failed to post at stage '{stage}': {e}",
+                "screenshot": shot,
+            }
         finally:
             await self.close()
 
