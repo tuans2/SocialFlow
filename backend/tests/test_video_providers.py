@@ -124,7 +124,10 @@ check("posts to predictLongRunning", url.endswith(":predictLongRunning"), True)
 check("  header auth, not a query param", headers["x-goog-api-key"], "k")
 check("  prompt sits in instances[0]", body["instances"][0]["prompt"], "a cat surfing")
 check("  aspectRatio in parameters", body["parameters"]["aspectRatio"], "9:16")
-check("  durationSeconds is a string", body["parameters"]["durationSeconds"], "8")
+check("  durationSeconds is a NUMBER, not a string",
+      body["parameters"]["durationSeconds"], 8)
+check("  and really an int type",
+      isinstance(body["parameters"]["durationSeconds"], int), True)
 check("  job starts non-terminal", job.done, False)
 check("  operation name captured", job.provider_job_id, OP)
 
@@ -136,7 +139,7 @@ check("negativePrompt forwarded when given",
 reset()
 run(p.submit("x", duration=4, resolution="1080p"))
 check("1080p forces the max duration",
-      FakeHttp.calls[0][3]["parameters"]["durationSeconds"], "8")
+      FakeHttp.calls[0][3]["parameters"]["durationSeconds"], 8)
 
 # ── image-to-video is inline base64, per the reference ───────────────────
 reset()

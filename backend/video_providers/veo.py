@@ -117,7 +117,11 @@ class VeoProvider(VideoProvider):
 
         parameters = {
             "aspectRatio": aspect,
-            "durationSeconds": str(duration),
+            # A NUMBER, not a string. The published reference shows "4"/"6"/"8"
+            # quoted; the live API rejects that with
+            #   "The value type for `durationSeconds` needs to be a number."
+            # Verified against the real endpoint on 2026-09-03.
+            "durationSeconds": int(duration),
             "resolution": res,
         }
         if negative_prompt:
