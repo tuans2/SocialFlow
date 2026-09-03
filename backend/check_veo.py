@@ -83,7 +83,8 @@ def listing(key: str) -> int:
         print("  For vertical social clips the lite/fast tiers are usually enough;")
         print("  the standard tier costs several times more per clip.")
 
-    wanted = os.getenv("VEO_MODEL", "veo-3.1-generate-preview")
+    from video_providers.veo import VeoProvider
+    wanted = os.getenv("VEO_MODEL") or VeoProvider.DEFAULT_MODEL
     if wanted in veo:
         print(f"\n  ✓ Configured VEO_MODEL '{wanted}' is available.")
         if cheap and wanted != cheap:

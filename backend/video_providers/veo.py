@@ -51,9 +51,15 @@ class VeoProvider(VideoProvider):
     def api_key(self) -> str:
         return self._api_key if self._api_key is not None else os.getenv("GEMINI_API_KEY", "")
 
+    # Default to the fast tier, not the standard one. Veo ships three tiers
+    # and the standard model costs several times more per clip; for the
+    # vertical social clips this app makes, fast is the sensible default and
+    # nobody should pay the premium by simply not setting a variable.
+    DEFAULT_MODEL = "veo-3.1-fast-generate-preview"
+
     @property
     def model(self) -> str:
-        return self._model or os.getenv("VEO_MODEL", "veo-3.1-generate-preview")
+        return self._model or os.getenv("VEO_MODEL") or self.DEFAULT_MODEL
 
     @property
     def resolution(self) -> str:

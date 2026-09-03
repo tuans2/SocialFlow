@@ -242,6 +242,18 @@ try:
 except TypeError:
     check("incomplete provider rejected", True, True)
 
+# ── the default tier is the cheap one, not the premium one ───────────────
+os.environ.pop("VEO_MODEL", None)
+check("defaults to the fast tier", VeoProvider(api_key="k").model,
+      "veo-3.1-fast-generate-preview")
+os.environ["VEO_MODEL"] = "veo-3.1-lite-generate-preview"
+check("  .env overrides the default", VeoProvider(api_key="k").model,
+      "veo-3.1-lite-generate-preview")
+check("  an explicit argument beats .env",
+      VeoProvider(api_key="k", model="veo-3.1-generate-preview").model,
+      "veo-3.1-generate-preview")
+os.environ.pop("VEO_MODEL", None)
+
 print("=" * 62)
 for n, g, w in FAIL:
     print(f"FAIL  {n}\n        got={g!r} want={w!r}")
