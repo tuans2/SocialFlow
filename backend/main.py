@@ -41,6 +41,14 @@ from agents.planner import init_plans_table
 DATABASE_PATH = "socialflow.db"
 UPLOADS_DIR = Path("uploads")
 UPLOADS_DIR.mkdir(exist_ok=True)
+
+# Shared media path resolution + publish quality gate (see backend/media_utils.py)
+from media_utils import (
+    requires_image,
+    resolve_media_path,
+    to_public_url,
+    validate_publish_media,
+)
 SESSIONS_DIR = Path("sessions")
 SESSIONS_DIR.mkdir(exist_ok=True)
 
@@ -75,6 +83,11 @@ def load_config():
         "HEYGEN_PASSWORD": os.getenv("HEYGEN_PASSWORD", ""),
         "HEADLESS": os.getenv("HEADLESS", "false").lower() == "true",
         "IMAGE_MODEL": os.getenv("IMAGE_MODEL", "gpt-image-1.5"),  # gpt-image-1.5 (replaces dall-e-3)
+        # gpt-image-*: low | medium | high | auto ; dall-e-3: standard | hd
+        "IMAGE_QUALITY": os.getenv("IMAGE_QUALITY", ""),
+        "ZALO_APP_ID": os.getenv("ZALO_APP_ID", ""),
+        "ZALO_SECRET_KEY": os.getenv("ZALO_SECRET_KEY", ""),
+        "ZALO_REFRESH_TOKEN": os.getenv("ZALO_REFRESH_TOKEN", ""),
     }
 
 CONFIG = load_config()
@@ -333,25 +346,31 @@ async def _generate_gemini(prompt: str) -> str:
             detail="Gemini API key not configured. Add GEMINI_API_KEY to your .env file. Get your key at aistudio.google.com"
         )
 
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={CONFIG['GEMINI_API_KEY']}",
-            headers={"Content-Type": "application/json"},
-            json={
-                "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"maxOutputTokens": 2000}
-            },
-            timeout=60.0
-        )
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={CONFIG['GEMINI_API_KEY']}",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"maxOutputTokens": 2000}
+                },
+                timeout=60.0
+            )
 
-        if response.status_code != 200:
-            error_detail = response.text
-            if "API_KEY_INVALID" in error_detail:
-                raise HTTPException(status_code=401, detail="Invalid Gemini API key.")
-            raise HTTPException(status_code=response.status_code, detail=error_detail)
+            if response.status_code != 200:
+                error_detail = response.text
+                if "API_KEY_INVALID" in error_detail:
+                    raise HTTPException(status_code=401, detail="Invalid Gemini API key.")
+                raise HTTPException(status_code=response.status_code, detail=error_detail)
 
-        return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+            return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+            
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Gemini API request timed out. The Google server is overloaded or blocked. Try again later.")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Failed to connect to Gemini API: {str(e)}")
 
 
 async def generate_image(prompt: str, size: str = "1024x1024", save_as: str = None) -> str:
@@ -365,6 +384,13 @@ async def generate_image(prompt: str, size: str = "1024x1024", save_as: str = No
 
     model = CONFIG.get("IMAGE_MODEL", "gpt-image-1.5")
 
+    # The `quality` enum differs per model family:
+    #   gpt-image-*  -> low | medium | high | auto
+    #   dall-e-3     -> standard | hd
+    quality = (CONFIG.get("IMAGE_QUALITY") or "").strip()
+    if not quality:
+        quality = "high" if model.startswith("gpt-image") else "standard"
+
     async with httpx.AsyncClient() as client:
         response = await client.post(
             "https://api.openai.com/v1/images/generations",
@@ -377,7 +403,7 @@ async def generate_image(prompt: str, size: str = "1024x1024", save_as: str = No
                 "prompt": prompt,
                 "n": 1,
                 "size": size,
-                "quality": "standard"
+                "quality": quality
             },
             timeout=120.0
         )
@@ -636,16 +662,27 @@ async def publish_scheduled_post(post_id: int):
         return
     
     account = dict(account_row)
-    
+
+    # ---- PUBLISH QUALITY GATE (backend enforcement, before any browser) ----
+    gate_ok, gate_error, media_paths = validate_publish_media(
+        post["platform"], post.get("content_type"), post.get("media_paths")
+    )
+    if not gate_ok:
+        print(f"[QualityGate] BLOCKED post #{post_id}: {gate_error}")
+        c.execute(
+            "UPDATE posts SET status = 'failed', error_message = ? WHERE id = ?",
+            (gate_error, post_id)
+        )
+        conn.commit()
+        conn.close()
+        return
+
     try:
         # Get automation instance
-        auto = get_automation(post["platform"], headless=CONFIG["HEADLESS"])
-        
-        # Parse media paths
-        media_paths = json.loads(post["media_paths"]) if post["media_paths"] else None
-        
-        # Post content
-        result = await auto.post(post["content"], media_paths)
+        auto = get_automation_extended(post["platform"], headless=CONFIG["HEADLESS"])
+
+        # Post content (media_paths already resolved to absolute, existing files)
+        result = await auto.post(post["content"], media_paths or None)
         
         if result["success"]:
             c.execute(
@@ -862,6 +899,22 @@ async def api_publish_post(post_id: int, background_tasks: BackgroundTasks):
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="Post not found or not approved")
+
+    post_row = dict(row)
+
+    # ---- PUBLISH QUALITY GATE ----
+    gate_ok, gate_error, _ = validate_publish_media(
+        post_row["platform"], post_row.get("content_type"), post_row.get("media_paths")
+    )
+    if not gate_ok:
+        conn.execute(
+            "UPDATE posts SET status = 'failed', error_message = ? WHERE id = ?",
+            (gate_error, post_id)
+        )
+        conn.commit()
+        conn.close()
+        print(f"[QualityGate] BLOCKED post #{post_id}: {gate_error}")
+        raise HTTPException(status_code=400, detail=gate_error)
     conn.close()
     # Publish in background
     background_tasks.add_task(_publish_single_post, dict(row))
@@ -871,7 +924,7 @@ async def api_publish_post(post_id: int, background_tasks: BackgroundTasks):
 async def _publish_single_post(post: dict):
     """Publish a single post (background task)."""
     from agents.publisher import publish_post
-    await publish_post(post, automation_getter=lambda p: get_automation(p) if p != "discord" else None)
+    await publish_post(post, automation_getter=lambda p: get_automation_extended(p))
 
 
 @app.get("/api/pipeline/signals")
@@ -943,7 +996,7 @@ async def login_account(platform: str):
     password = decrypt(account["password_encrypted"])
     
     try:
-        auto = get_automation(platform, headless=False)  # Always visible for login
+        auto = get_automation_extended(platform, headless=False)  # Always visible for login
         result = await auto.login(account["username"], password)
         await auto.close()
         
@@ -965,7 +1018,7 @@ async def login_account(platform: str):
 async def check_login_status(platform: str):
     """Check if still logged in to a platform"""
     try:
-        auto = get_automation(platform, headless=True)
+        auto = get_automation_extended(platform, headless=True)
         is_logged_in = await auto.check_login()
         await auto.close()
         
@@ -997,6 +1050,32 @@ async def delete_account(platform: str):
     return {"deleted": True}
 
 # --- Content Generation ---
+def build_post_image_prompt(platform: str, topic: str, content: str,
+                            custom_instructions: str = None) -> str:
+    """Build the visual prompt for a single social post image.
+
+    Derived from platform + topic + the generated caption + custom instructions.
+    """
+    excerpt = " ".join((content or "").split())
+    if len(excerpt) > 600:
+        excerpt = excerpt[:600] + "..."
+    extra = ""
+    if custom_instructions and custom_instructions.strip():
+        extra = f"\nAdditional creative direction: {custom_instructions.strip()}"
+
+    return f"""Create a high-quality, visual-first social media image for a {platform} post.
+
+Topic: {topic}
+The image must match the meaning and the emotion of this caption: "{excerpt}"{extra}
+
+Requirements:
+- Square 1:1 composition, optimized for social media feeds
+- Visual storytelling only: no paragraphs, no long sentences, no dense text blocks
+- Do NOT invent logos, brand marks, or fake company names
+- Photographic or clean modern illustration, vibrant but uncluttered
+- Professional, high production quality, appropriate for a business audience"""
+
+
 @app.post("/api/generate")
 async def generate_content(request: ContentRequest):
     """Generate AI content"""
@@ -1005,7 +1084,9 @@ async def generate_content(request: ContentRequest):
     platform_tips = {
         "linkedin": "Professional tone, thought leadership, industry insights. Use line breaks for readability. Include 3-5 relevant hashtags at the end.",
         "instagram": "Casual, engaging, visual-first. Use emojis strategically. Include 20-30 hashtags in a comment or at the end.",
-        "twitter": "Concise, punchy, conversation-starting. Max 280 characters for single tweets. Use threads for longer content."
+        "twitter": "Concise, punchy, conversation-starting. Max 280 characters for single tweets. Use threads for longer content.",
+        "zalo": "Viết bằng tiếng Việt, thân thiện, gần gũi. Phù hợp với đối tượng người dùng Việt Nam. Tiêu đề hấp dẫn, nội dung súc tích. Dùng emoji vừa phải.",
+        "tiktok": "Năng động, Gen Z, bắt trend. Rất ngắn gọn. Caption chỉ khoảng 1-2 câu để kích thích comment. Thêm 3-5 hashtag đang thịnh hành."
     }
     
     content_formats = {
@@ -1015,6 +1096,20 @@ async def generate_content(request: ContentRequest):
         "thread": "Create a Twitter/X thread with 5-8 tweets. Number each tweet. First tweet is the hook. Last tweet is the CTA."
     }
     
+    # A single post is published verbatim, so it must not contain production
+    # notes. carousel / reel / thread keep their structured section format.
+    output_rules = ""
+    if request.content_type == "post":
+        output_rules = """
+
+Output rules:
+- Return ONLY the final post text, ready to publish as-is.
+- No placeholders or production notes: never write things like
+  [Attached Image: ...], [Insert Call-to-Action Button: ...], "Visual suggestion:",
+  "Caption:" or any bracketed instruction.
+- Do not describe or refer to an attached image — a separate visual is generated
+  automatically and will be uploaded with the post."""
+
     prompt = f"""{content_formats.get(request.content_type, 'Create a post')} about: {request.topic}
 
 Platform: {request.platform.upper()}
@@ -1022,16 +1117,45 @@ Tips: {platform_tips.get(request.platform.lower(), '')}
 
 {request.custom_instructions or ''}
 
-Make it engaging, authentic, and optimized for maximum reach."""
+Make it engaging, authentic, and optimized for maximum reach.{output_rules}"""
 
     content = await generate_content_ai(prompt)
-    
-    return {
+
+    response = {
         "content": content,
         "platform": request.platform,
         "content_type": request.content_type,
+        "media_paths": [],
         "generated_at": datetime.now().isoformat()
     }
+
+    # --- Visual: a single post on an image-required platform also gets one image ---
+    # carousel keeps its own /api/generate-carousel slide pipeline,
+    # reel keeps the video pipeline, thread stays text-only.
+    if requires_image(request.platform, request.content_type):
+        image_prompt = build_post_image_prompt(
+            platform=request.platform,
+            topic=request.topic,
+            content=content,
+            custom_instructions=request.custom_instructions
+        )
+        filename = f"post_{request.platform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        try:
+            saved = await generate_image(image_prompt, "1024x1024", save_as=filename)
+            abs_path = resolve_media_path(saved)
+            if not abs_path:
+                raise RuntimeError("generated image file not found after saving")
+            response["media_paths"] = [abs_path]
+            response["image_path"] = abs_path
+            response["image_url"] = to_public_url(abs_path)
+        except Exception as e:
+            detail = e.detail if isinstance(e, HTTPException) else str(e)
+            response["image_required"] = True
+            response["image_error"] = (
+                f"Content generated successfully, but image generation failed: {detail}"
+            )
+
+    return response
 
 
 # --- Carousel Generation ---
@@ -1098,9 +1222,8 @@ Requirements:
 Do NOT include any text in the image."""
 
         try:
-            image_url = await generate_image_dalle(enhanced_prompt, "1024x1024")
             filename = f"carousel_{timestamp}_slide_{i+1}.png"
-            local_path = await download_image(image_url, filename)
+            local_path = await generate_image(enhanced_prompt, "1024x1024", save_as=filename)
             
             generated_images.append({
                 "slide_number": i + 1,
@@ -1475,6 +1598,28 @@ async def publish_now(post_id: int, background_tasks: BackgroundTasks):
     """Publish a post immediately"""
     conn = get_db()
     c = conn.cursor()
+    c.execute("SELECT * FROM posts WHERE id = ?", (post_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    post = dict(row)
+
+    # ---- PUBLISH QUALITY GATE (before the publisher is ever scheduled) ----
+    gate_ok, gate_error, _ = validate_publish_media(
+        post["platform"], post.get("content_type"), post.get("media_paths")
+    )
+    if not gate_ok:
+        c.execute(
+            "UPDATE posts SET status = 'failed', error_message = ? WHERE id = ?",
+            (gate_error, post_id)
+        )
+        conn.commit()
+        conn.close()
+        print(f"[QualityGate] BLOCKED post #{post_id}: {gate_error}")
+        raise HTTPException(status_code=400, detail=gate_error)
+
     c.execute("UPDATE posts SET status = 'publishing' WHERE id = ?", (post_id,))
     conn.commit()
     conn.close()
@@ -1505,7 +1650,8 @@ async def get_config():
         "gemini_configured": bool(CONFIG["GEMINI_API_KEY"]),
         "ai_provider": CONFIG.get("AI_PROVIDER", "openai"),
         "kling_configured": bool(CONFIG["KLING_API_KEY"]),
-        "headless_mode": CONFIG["HEADLESS"]
+        "headless_mode": CONFIG["HEADLESS"],
+        "zalo_configured": bool(CONFIG.get("ZALO_APP_ID") and CONFIG.get("ZALO_SECRET_KEY") and CONFIG.get("ZALO_REFRESH_TOKEN"))
     }
 
 class ConfigUpdate(BaseModel):
@@ -1515,6 +1661,9 @@ class ConfigUpdate(BaseModel):
     AI_PROVIDER: Optional[str] = None
     KLING_API_KEY: Optional[str] = None
     HEADLESS: Optional[bool] = None
+    ZALO_APP_ID: Optional[str] = None
+    ZALO_SECRET_KEY: Optional[str] = None
+    ZALO_REFRESH_TOKEN: Optional[str] = None
 
 @app.post("/api/config")
 async def update_config(new_config: ConfigUpdate):
@@ -1574,6 +1723,21 @@ async def publish_extended(post_id: int, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=404, detail="Post not found")
 
     post = dict(post)
+
+    # ---- PUBLISH QUALITY GATE ----
+    gate_ok, gate_error, gate_media = validate_publish_media(
+        post["platform"], post.get("content_type"), post.get("media_paths")
+    )
+    if not gate_ok:
+        c.execute(
+            "UPDATE posts SET status = 'failed', error_message = ? WHERE id = ?",
+            (gate_error, post_id)
+        )
+        conn.commit()
+        conn.close()
+        print(f"[QualityGate] BLOCKED post #{post_id}: {gate_error}")
+        raise HTTPException(status_code=400, detail=gate_error)
+
     c.execute("UPDATE posts SET status = 'publishing' WHERE id = ?", (post_id,))
     conn.commit()
     conn.close()
@@ -1583,8 +1747,7 @@ async def publish_extended(post_id: int, background_tasks: BackgroundTasks):
         c2 = conn2.cursor()
         try:
             auto = get_automation_extended(post["platform"], headless=CONFIG["HEADLESS"])
-            media = json.loads(post["media_paths"]) if post["media_paths"] else None
-            result = await auto.post(post["content"], media)
+            result = await auto.post(post["content"], gate_media or None)
             if hasattr(auto, 'close'):
                 await auto.close()
 

@@ -213,59 +213,109 @@ class InstagramAutomation(SocialAutomation):
     HOME_URL = "https://www.instagram.com/"
     
     async def login(self, username: str, password: str) -> dict:
-        """Login to Instagram"""
+        """Login to Instagram with human-in-the-loop security verification."""
         await self.init_browser()
         await self.create_new_context()
-        
+
         try:
             await self.page.goto(self.LOGIN_URL)
-            await self.page.wait_for_load_state("networkidle")
+            await self.page.wait_for_load_state("domcontentloaded")
             await self.page.wait_for_timeout(2000)
-            
+
             # Handle cookie popup
             try:
-                cookie_btn = await self.page.query_selector('button:has-text("Allow"), button:has-text("Accept")')
-                if cookie_btn:
-                    await cookie_btn.click()
+                cookie_btn = self.page.locator(
+                    'button:has-text("Allow"), button:has-text("Accept")'
+                ).first
+                if await cookie_btn.is_visible(timeout=2000):
+                    await cookie_btn.click(no_wait_after=True)
                     await self.page.wait_for_timeout(1000)
             except Exception:
                 pass
-            
-            # Fill credentials
-            await self.page.fill('input[name="username"]', username)
-            await self.page.fill('input[name="password"]', password)
-            await self.page.click('button[type="submit"]')
-            
-            await self.page.wait_for_timeout(5000)
-            
-            # Handle "Save Login Info" popup
-            try:
-                save_btn = await self.page.query_selector('button:has-text("Save Info"), button:has-text("Not Now")')
-                if save_btn:
-                    await save_btn.click()
-            except Exception:
-                pass
-            
-            # Handle notifications popup
-            try:
-                notif_btn = await self.page.query_selector('button:has-text("Not Now")')
-                if notif_btn:
-                    await notif_btn.click()
-            except Exception:
-                pass
-            
+
+            # Current Instagram login fields
+            await self.page.locator(
+                'input[name="email"]:visible'
+            ).fill(username)
+
+            await self.page.locator(
+                'input[name="pass"]:visible'
+            ).fill(password)
+
+            # Submit login without waiting for navigation.
+            # Instagram currently exposes the login submit input in the DOM.
+            submit_btn = self.page.locator('input[type="submit"]').first
+
+            await submit_btn.wait_for(state="attached", timeout=10000)
+            await submit_btn.evaluate("(el) => el.click()")
+
+            await self.page.wait_for_timeout(3000)
+
+            # Instagram security verification / CAPTCHA
+            if (
+                "/auth_platform/recaptcha/" in self.page.url
+                or "challenge" in self.page.url
+            ):
+                print("⚠️ Instagram security verification required.")
+                print("👉 Complete the CAPTCHA/security check manually.")
+                print("⏳ Waiting up to 120 seconds...")
+
+                for _ in range(120):
+                    await self.page.wait_for_timeout(1000)
+
+                    current_url = self.page.url
+
+                    if (
+                        "/auth_platform/recaptcha/" not in current_url
+                        and "challenge" not in current_url
+                        and "login" not in current_url
+                    ):
+                        break
+
+                await self.page.wait_for_timeout(3000)
+
+            # Handle "Save Login Info" / notification popups
+            for text in ["Save Info", "Not Now"]:
+                try:
+                    btn = self.page.get_by_role(
+                        "button",
+                        name=text,
+                        exact=True
+                    ).first
+
+                    if await btn.is_visible(timeout=1500):
+                        await btn.click(no_wait_after=True)
+                        await self.page.wait_for_timeout(1000)
+                except Exception:
+                    pass
+
             await self.page.wait_for_timeout(2000)
-            
+
             # Verify login
-            if "login" not in self.page.url:
+            current_url = self.page.url
+
+            if (
+                "login" not in current_url
+                and "/auth_platform/recaptcha/" not in current_url
+                and "challenge" not in current_url
+            ):
                 await self.save_session(self.PLATFORM)
-                return {"success": True, "message": "Logged in successfully"}
-            else:
-                return {"success": False, "message": "Login failed"}
-                
+                return {
+                    "success": True,
+                    "message": "Logged in successfully"
+                }
+
+            return {
+                "success": False,
+                "message": "Instagram login failed or verification was not completed"
+            }
+
         except Exception as e:
-            return {"success": False, "message": str(e)}
-    
+            return {
+                "success": False,
+                "message": str(e)
+            }
+
     async def check_login(self) -> bool:
         """Check if already logged in"""
         await self.init_browser()

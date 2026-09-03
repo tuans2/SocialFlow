@@ -16,6 +16,10 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from media_utils import validate_publish_media  # noqa: E402
 
 DB_PATH = Path(__file__).parent.parent / "socialflow.db"
 
@@ -70,7 +74,15 @@ async def publish_post(post: Dict, automation_getter) -> bool:
     platform = post["platform"]
     content = post["content"]
     post_id = post["id"]
-    media = json.loads(post.get("media_paths", "[]") or "[]") if post.get("media_paths") else []
+
+    # ---- PUBLISH QUALITY GATE (before any browser is started) ----
+    gate_ok, gate_error, media = validate_publish_media(
+        platform, post.get("content_type"), post.get("media_paths")
+    )
+    if not gate_ok:
+        print(f"[Publisher] BLOCKED #{post_id}: {gate_error}")
+        mark_failed(post_id, gate_error)
+        return False
 
     print(f"[Publisher] Publishing #{post_id} to {platform} ({len(content)} chars)")
 
@@ -93,16 +105,21 @@ async def publish_post(post: Dict, automation_getter) -> bool:
             await automation.close()
             return False
 
-        # Post content
-        image_path = media[0] if media else None
-        success = await automation.post(content, image_path=image_path)
+        # Post content — automations take image_paths: List[str]
+        result = await automation.post(content, media or None)
+        if isinstance(result, dict):
+            success = bool(result.get("success"))
+            failure_message = result.get("message", "")
+        else:
+            success = bool(result)
+            failure_message = ""
 
         if success:
             await automation.save_session(platform)
             mark_posted(post_id)
             print(f"[Publisher] POSTED #{post_id} to {platform}")
         else:
-            mark_failed(post_id, f"Playwright posting failed for {platform}")
+            mark_failed(post_id, failure_message or f"Playwright posting failed for {platform}")
             print(f"[Publisher] FAILED #{post_id} to {platform}")
 
         await automation.close()
