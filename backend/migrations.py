@@ -40,12 +40,39 @@ COLUMNS: List[Tuple[str, str, str]] = [
     ("assets", "parent_asset_id", "TEXT"),
 ]
 
+# Tables this module owns outright (asset_inventory.py owns the older ones).
+TABLES = {
+    # A generation request, so a poll knows which provider a task belongs to.
+    # Without this the app can only ever talk to one video API: a bare task id
+    # says nothing about who issued it.
+    "video_jobs": """
+        CREATE TABLE IF NOT EXISTS video_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT UNIQUE NOT NULL,
+            provider TEXT NOT NULL,
+            provider_job_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued',
+            kind TEXT DEFAULT 'video',
+            prompt TEXT,
+            params TEXT,
+            asset_id TEXT,
+            video_url TEXT,
+            cost_usd REAL,
+            error TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """,
+}
+
 INDEXES: List[Tuple[str, str, str]] = [
     ("idx_assets_sha256", "assets", "sha256"),
     ("idx_assets_type", "assets", "asset_type"),
     ("idx_assets_origin", "assets", "origin"),
     ("idx_assets_created", "assets", "created_at"),
     ("idx_assets_parent", "assets", "parent_asset_id"),
+    ("idx_video_jobs_job", "video_jobs", "job_id"),
+    ("idx_video_jobs_status", "video_jobs", "status"),
 ]
 
 
@@ -65,8 +92,16 @@ def run_migrations(database_path: str = None) -> dict:
     path = database_path or DATABASE_PATH
     added_columns, added_indexes, skipped = [], [], []
 
+    created_tables = []
+
     conn = sqlite3.connect(path)
     try:
+        for table, ddl in TABLES.items():
+            existed = _table_exists(conn, table)
+            conn.execute(ddl)
+            if not existed:
+                created_tables.append(table)
+
         for table, column, decl in COLUMNS:
             if not _table_exists(conn, table):
                 skipped.append(f"{table}.{column} (table missing)")
@@ -89,6 +124,7 @@ def run_migrations(database_path: str = None) -> dict:
         conn.close()
 
     return {
+        "created_tables": created_tables,
         "added_columns": added_columns,
         "added_indexes": added_indexes,
         "skipped": skipped,

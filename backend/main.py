@@ -47,6 +47,9 @@ UPLOADS_DIR.mkdir(exist_ok=True)
 
 # Shared media path resolution + publish quality gate (see backend/media_utils.py)
 from media_store import MediaRejected, store_bytes, store_upload
+import video_jobs as video_job_store
+import video_providers
+from video_providers import JobStatus, ProviderError
 from media_utils import (
     requires_image,
     resolve_media_path,
@@ -176,6 +179,7 @@ class VideoRequest(BaseModel):
     aspect_ratio: str = "9:16"  # 9:16 (vertical/reel), 16:9 (horizontal), 1:1 (square)
     mode: str = "std"  # std or pro
     platform: str = "instagram"  # instagram, tiktok, youtube
+    provider: Optional[str] = None  # veo | kling | ... ; None = configured default
 
 
 class ReelRequest(BaseModel):
@@ -184,6 +188,7 @@ class ReelRequest(BaseModel):
     duration: int = 5
     platform: str = "instagram"
     custom_instructions: Optional[str] = None
+    provider: Optional[str] = None
 
 
 class AvatarRequest(BaseModel):
@@ -1347,52 +1352,212 @@ Do NOT include any text in the image."""
 
 
 # --- Video Generation (Kling AI) ---
+@app.get("/api/video-providers")
+async def list_video_providers():
+    """Which video backends exist and which are actually usable."""
+    return {
+        "providers": video_providers.available(),
+        "default": video_providers.default_name(),
+    }
+
+
+async def _read_local_image(image_url: str) -> tuple:
+    """Turn an image reference into bytes for image-to-video.
+
+    Accepts anything the media resolver understands — an asset path, an
+    /uploads URL, an absolute path — so a picture already in the library can
+    seed a video without a round trip through the network.
+    """
+    if not image_url:
+        return None, None
+    candidate = image_url
+    if "/uploads/" in candidate:
+        candidate = candidate[candidate.index("/uploads/"):]
+    resolved = resolve_media_path(candidate)
+    if resolved:
+        suffix = Path(resolved).suffix.lower()
+        mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".webp": "image/webp"}.get(suffix, "image/png")
+        return Path(resolved).read_bytes(), mime
+    if image_url.startswith(("http://", "https://")):
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            resp = await client.get(image_url, timeout=60.0)
+        if resp.status_code == 200:
+            return resp.content, resp.headers.get("content-type", "image/png")
+    raise HTTPException(status_code=400, detail=f"Could not read image: {image_url}")
+
+
 @app.post("/api/generate-video")
-async def generate_video(request: VideoRequest, background_tasks: BackgroundTasks):
-    """Generate video using Kling AI"""
-    
+async def generate_video(request: VideoRequest, background_tasks: BackgroundTasks = None):
+    """Start a video generation on the configured provider."""
     try:
+        provider = video_providers.get(getattr(request, "provider", None))
+
+        image_bytes = image_mime = None
         if request.video_type == "image_to_video":
             if not request.image_url:
-                raise HTTPException(status_code=400, detail="image_url is required for image_to_video")
-            result = await KlingAI.generate_video_from_image(
-                image_url=request.image_url,
-                prompt=request.prompt,
-                duration=request.duration,
-                mode=request.mode
-            )
-        else:
-            result = await KlingAI.generate_video_from_text(
-                prompt=request.prompt,
-                duration=request.duration,
-                aspect_ratio=request.aspect_ratio,
-                mode=request.mode
-            )
-        
+                raise HTTPException(
+                    status_code=400,
+                    detail="image_url is required for image_to_video",
+                )
+            if not provider.supports_image_to_video:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{provider.label} does not support image-to-video",
+                )
+            image_bytes, image_mime = await _read_local_image(request.image_url)
+
+        job = await provider.submit(
+            request.prompt,
+            duration=request.duration,
+            aspect_ratio=request.aspect_ratio,
+            image_bytes=image_bytes,
+            image_mime=image_mime or "image/png",
+        )
+
+        duration = job.raw.get("duration", provider.normalise_duration(request.duration))
+        record = video_job_store.create(
+            provider.name, job.provider_job_id,
+            prompt=request.prompt, kind="video",
+            params={"aspect_ratio": job.raw.get("aspect_ratio"),
+                    "duration": duration,
+                    "platform": request.platform,
+                    "model": job.raw.get("model")},
+            cost_usd=provider.estimated_cost(duration),
+        )
+
         return {
             "success": True,
-            "task_id": result.get("task_id"),
+            "task_id": record["job_id"],
+            "job_id": record["job_id"],
+            "provider": provider.name,
             "status": "processing",
-            "message": "Video generation started. Use /api/video-status/{task_id} to check progress."
+            "estimated_cost_usd": record["cost_usd"],
+            "message": f"{provider.label} is generating. "
+                       f"Poll /api/video-status/{record['job_id']}.",
         }
+
+    except ProviderError as e:
+        return {"success": False, "error": e.reason}
+    except HTTPException as e:
+        return {"success": False, "error": e.detail}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
 @app.get("/api/video-status/{task_id}")
 async def check_video_status(task_id: str):
-    """Check video generation status"""
+    """Poll a generation, and store the video the moment it is ready.
+
+    Downloading on completion is not an optimisation — Veo deletes generated
+    files after about two days, so a provider URL handed to the browser is a
+    link that dies over the weekend. The bytes go into the media library and
+    every later reference points at our own copy.
+    """
+    record = video_job_store.get(task_id) or video_job_store.get_by_provider_job(task_id)
+    if not record:
+        return {"success": False, "error": f"Unknown video job '{task_id}'"}
+
+    # Already finished: answer from the database, do not re-charge the provider.
+    if record["status"] in (JobStatus.SUCCEEDED, JobStatus.FAILED):
+        return _video_status_response(record)
+
+    provider = video_providers.get_optional(record["provider"])
+    if provider is None:
+        return {"success": False, "task_id": task_id,
+                "error": f"Provider '{record['provider']}' is no longer registered"}
+
     try:
-        result = await KlingAI.check_task_status(task_id)
-        return {
-            "success": True,
-            "task_id": task_id,
-            "status": result.get("status"),
-            "video_url": result.get("video_url") or result.get("output", {}).get("video_url"),
-            "data": result
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+        job = await provider.poll(record["provider_job_id"])
+    except ProviderError as e:
+        return {"success": False, "task_id": task_id, "status": record["status"],
+                "error": e.reason}
+
+    if job.status == JobStatus.FAILED:
+        record = video_job_store.update(task_id, status=JobStatus.FAILED,
+                                        error=job.error or "Generation failed")
+        return _video_status_response(record)
+
+    if job.status != JobStatus.SUCCEEDED:
+        video_job_store.update(task_id, status=JobStatus.RUNNING)
+        return {"success": True, "task_id": task_id, "job_id": task_id,
+                "provider": record["provider"], "status": "processing",
+                "video_url": None}
+
+    # Succeeded — fetch the bytes and register them before the provider expires them.
+    try:
+        data = await provider.download(job)
+        params = record.get("params") or {}
+        asset = store_bytes(
+            data,
+            declared_name=f"{record['job_id']}.mp4",
+            origin="generated",
+            provider=f"{provider.name}:{params.get('model') or ''}".rstrip(":"),
+            title=(record.get("prompt") or "Generated video")[:120],
+            tags=["video", record.get("kind") or "video", provider.name],
+            cost_usd=record.get("cost_usd"),
+            extra_metadata={"prompt": (record.get("prompt") or "")[:2000],
+                            "provider_job_id": record["provider_job_id"],
+                            **params},
+        )
+    except (ProviderError, MediaRejected) as e:
+        reason = getattr(e, "reason", str(e))
+        record = video_job_store.update(task_id, status=JobStatus.FAILED,
+                                        error=f"Generated, but could not be stored: {reason}",
+                                        video_url=job.video_url)
+        return _video_status_response(record)
+
+    record = video_job_store.update(task_id, status=JobStatus.SUCCEEDED,
+                                    asset_id=asset["asset_id"], video_url=asset["url"])
+    return _video_status_response(record, asset=asset)
+
+
+# Cost accounting note: when a generation produces bytes we already hold, the
+# media store returns the EXISTING asset — so assets.cost_usd carries only what
+# the first generation cost. Every run is still billed, so spend must be summed
+# from video_jobs, which has one row per generation. summarise_video_spend() is
+# the answer to "what did video cost me", not a query over assets.
+
+
+def _video_status_response(record: dict, asset: dict = None) -> dict:
+    """One response shape for every poll.
+
+    `status` stays "completed"/"failed"/"processing" because the existing
+    frontend polls on those strings.
+    """
+    wire_status = {
+        JobStatus.SUCCEEDED: "completed",
+        JobStatus.FAILED: "failed",
+    }.get(record["status"], "processing")
+
+    body = {
+        "success": record["status"] != JobStatus.FAILED,
+        "task_id": record["job_id"],
+        "job_id": record["job_id"],
+        "provider": record["provider"],
+        "status": wire_status,
+        "video_url": record.get("video_url"),
+        "asset_id": record.get("asset_id"),
+        "cost_usd": record.get("cost_usd"),
+    }
+    if record.get("error"):
+        body["error"] = record["error"]
+    if asset:
+        body["thumb_url"] = asset.get("thumb_url")
+        body["duration_seconds"] = asset.get("duration_seconds")
+        # Surfaced rather than hidden: an identical result was already held, so
+        # this job reuses that file instead of storing a second copy.
+        body["reused_existing_file"] = bool(asset.get("deduped"))
+    return body
+
+
+@app.get("/api/video-jobs")
+async def list_video_jobs(limit: int = 25, status: Optional[str] = None):
+    """Recent generations — what was made, by whom, and what it cost."""
+    return {
+        "jobs": video_job_store.recent(limit=limit, status=status),
+        "spend": video_job_store.spend_summary(),
+    }
 
 
 @app.post("/api/generate-reel")
@@ -1432,33 +1597,47 @@ Make it engaging and optimized for {request.platform}. Return ONLY valid JSON.""
         
         script_data = json.loads(clean_response)
         
-        # Step 2: Generate video with Kling AI
+        # Step 2: Generate the video on the configured provider
         video_prompt = script_data.get("video_prompt", request.topic)
-        
-        # Enhance for reel format
+
         enhanced_video_prompt = f"""{video_prompt}
 Style: Vertical video (9:16), dynamic, engaging for social media reels.
 Movement: Smooth camera movements, eye-catching transitions.
 Quality: High quality, vibrant colors, professional look."""
 
-        video_result = await KlingAI.generate_video_from_text(
-            prompt=enhanced_video_prompt,
+        provider = video_providers.get(getattr(request, "provider", None))
+        job = await provider.submit(
+            enhanced_video_prompt,
             duration=request.duration,
-            aspect_ratio="9:16",  # Vertical for reels
-            mode="std"
+            aspect_ratio="9:16",
         )
-        
+
+        duration = job.raw.get("duration", provider.normalise_duration(request.duration))
+        record = video_job_store.create(
+            provider.name, job.provider_job_id,
+            prompt=enhanced_video_prompt, kind="reel",
+            params={"aspect_ratio": "9:16", "duration": duration,
+                    "platform": request.platform, "topic": request.topic,
+                    "model": job.raw.get("model")},
+            cost_usd=provider.estimated_cost(duration),
+        )
+
         return {
             "success": True,
             "reel": {
                 "topic": request.topic,
                 "platform": request.platform,
                 "script": script_data,
-                "video_task_id": video_result.get("task_id"),
+                "video_task_id": record["job_id"],
                 "video_status": "processing",
+                "provider": provider.name,
+                "estimated_cost_usd": record["cost_usd"],
                 "generated_at": datetime.now().isoformat()
             }
         }
+
+    except ProviderError as e:
+        return {"success": False, "error": e.reason}
         
     except json.JSONDecodeError:
         return {"success": False, "error": "Failed to parse script", "raw": script_response}
