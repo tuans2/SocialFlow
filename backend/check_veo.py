@@ -27,6 +27,25 @@ import httpx  # noqa: E402
 
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 
+AVAILABLE_VEO = []
+
+
+# Cheapest first. The ordering is what matters and is consistent across
+# sources; the absolute prices are not — some quote per second, some per
+# video — so nothing here states a number. Check Google's pricing page.
+PREFERENCE = [
+    "veo-3.1-lite-generate-preview",    # cheapest, "functional" quality
+    "veo-3.1-fast-generate-preview",    # mid, aimed at social
+    "veo-3.1-generate-preview",         # highest quality, priciest
+]
+
+
+def cheapest(available):
+    for name in PREFERENCE:
+        if name in available:
+            return name
+    return available[0] if available else None
+
 
 def listing(key: str) -> int:
     print("→ Checking the key and which models it can see…\n")
@@ -45,6 +64,7 @@ def listing(key: str) -> int:
 
     names = [m["name"].replace("models/", "") for m in resp.json().get("models", [])]
     veo = sorted(n for n in names if "veo" in n.lower())
+    AVAILABLE_VEO[:] = veo
 
     print(f"  ✓ Key works — {len(names)} models visible.")
     if veo:
@@ -57,9 +77,17 @@ def listing(key: str) -> int:
         print("    Text and image generation are unaffected.")
         return 2
 
+    cheap = cheapest(veo)
+    if cheap and len(veo) > 1:
+        print(f"\n  Cheapest available: {cheap}")
+        print("  For vertical social clips the lite/fast tiers are usually enough;")
+        print("  the standard tier costs several times more per clip.")
+
     wanted = os.getenv("VEO_MODEL", "veo-3.1-generate-preview")
     if wanted in veo:
         print(f"\n  ✓ Configured VEO_MODEL '{wanted}' is available.")
+        if cheap and wanted != cheap:
+            print(f"    (a cheaper tier exists: set VEO_MODEL={cheap} in .env)")
     else:
         print(f"\n  ! Configured VEO_MODEL '{wanted}' is NOT in the list above.")
         print(f"    Set VEO_MODEL in .env to one of them, e.g. {veo[0]}")
@@ -67,11 +95,12 @@ def listing(key: str) -> int:
     return 0
 
 
-async def generate(key: str) -> int:
+async def generate(key: str, model: str = None) -> int:
     import video_providers
     from video_providers import ProviderError
+    from video_providers.veo import VeoProvider
 
-    provider = video_providers.get("veo")
+    provider = VeoProvider(model=model) if model else video_providers.get("veo")
     duration = provider.normalise_duration(int(os.getenv("VEO_TEST_DURATION", "4")))
     cost = provider.estimated_cost(duration)
 
@@ -120,6 +149,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--generate", action="store_true",
                     help="also generate one real clip (costs money, asks first)")
+    ap.add_argument("--model", default=None,
+                    help="model for the test clip; defaults to the cheapest available")
     args = ap.parse_args()
 
     key = os.getenv("GEMINI_API_KEY", "")
@@ -133,7 +164,8 @@ def main():
         if not args.generate and code == 0:
             print("\nAll good. Re-run with --generate to make one real clip.")
         return code
-    return asyncio.run(generate(key))
+    model = args.model or cheapest(AVAILABLE_VEO) or os.getenv("VEO_MODEL")
+    return asyncio.run(generate(key, model))
 
 
 if __name__ == "__main__":
