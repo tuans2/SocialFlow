@@ -68,9 +68,14 @@ def listing(key: str) -> int:
 
     print(f"  ✓ Key works — {len(names)} models visible.")
     if veo:
-        print("  ✓ Veo models available to this key:")
+        print("  ✓ Veo models the API lists:")
         for v in veo:
             print(f"      {v}")
+        print("\n  ! Listed is not the same as usable. This endpoint reports what the\n"
+              "    API knows about, not what your key is entitled to generate with.\n"
+              "    Veo needs billing enabled; on a free-tier key the models still\n"
+              "    appear here and the first generation fails with a quota error.\n"
+              "    Only --generate settles it.")
     else:
         print("  ✗ No Veo model is visible to this key.")
         print("    Video generation needs Veo enabled on a paid Gemini API project.")
@@ -131,24 +136,36 @@ async def generate(key: str, model: str = None) -> int:
                 break
 
         if not job.ok:
-            print(f"\n  ✗ Failed: {job.error}")
+            print(f"\n  ✗ Generation failed: {job.error}")
             return 1
 
         data = await provider.download(job)
-        import media_store
-        asset = media_store.store_bytes(
-            data, declared_name="veo-preflight.mp4", origin="generated",
-            provider=f"veo:{provider.model}", title="Veo preflight test",
-            tags=["test", "veo"], cost_usd=cost,
-        )
-        print(f"\n  ✓ Video stored: {asset['path']}")
-        print(f"    Served at:    {asset['url']}")
-        print(f"    Asset id:     {asset['asset_id']}")
-        return 0
 
     except ProviderError as e:
+        reason = e.reason.lower()
         print(f"\n  ✗ {e.reason}")
+        if "quota" in reason or "rate limit" in reason:
+            print("\n  This is an account limit, not a code problem — the request was")
+            print("  well-formed and rejected at billing. Veo is a paid-tier feature:")
+            print("  the models appear in the listing on a free key but generation")
+            print("  fails exactly like this.")
+            print("\n  Check https://ai.dev/rate-limit and whether billing is enabled")
+            print("  on the Google Cloud project behind this key.")
+            return 3
         return 1
+
+    import media_store
+    asset = media_store.store_bytes(
+        data, declared_name="veo-preflight.mp4", origin="generated",
+        provider=f"veo:{provider.model}", title="Veo preflight test",
+        tags=["test", "veo"], cost_usd=cost,
+    )
+    print(f"\n  ✓ Video stored: {asset['path']}")
+    print(f"    Served at:    {asset['url']}")
+    print(f"    Asset id:     {asset['asset_id']}")
+    print(f"    Size:         {asset['bytes']:,} bytes")
+    print("\n  End to end works: submit → poll → download → media library.")
+    return 0
 
 
 def main():
