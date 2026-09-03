@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""
+Veo preflight — answer "will this actually work" before spending anything.
+
+    cd backend && python3 check_veo.py            # free: key + model availability
+    cd backend && python3 check_veo.py --generate # ~one clip, costs real money
+
+The listing step costs nothing. The generation step is opt-in, prints the
+estimated cost and asks for confirmation before it runs.
+"""
+
+import argparse
+import asyncio
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+import httpx  # noqa: E402
+
+BASE = "https://generativelanguage.googleapis.com/v1beta"
+
+
+def listing(key: str) -> int:
+    print("→ Checking the key and which models it can see…\n")
+    try:
+        resp = httpx.get(f"{BASE}/models", params={"pageSize": "200"},
+                         headers={"x-goog-api-key": key}, timeout=30.0)
+    except Exception as e:
+        print(f"  ✗ Could not reach Google: {type(e).__name__}: {e}")
+        return 1
+
+    if resp.status_code != 200:
+        print(f"  ✗ HTTP {resp.status_code}: {resp.text[:400]}")
+        if resp.status_code in (401, 403):
+            print("\n  The key was rejected. Check GEMINI_API_KEY in .env.")
+        return 1
+
+    names = [m["name"].replace("models/", "") for m in resp.json().get("models", [])]
+    veo = sorted(n for n in names if "veo" in n.lower())
+
+    print(f"  ✓ Key works — {len(names)} models visible.")
+    if veo:
+        print("  ✓ Veo models available to this key:")
+        for v in veo:
+            print(f"      {v}")
+    else:
+        print("  ✗ No Veo model is visible to this key.")
+        print("    Video generation needs Veo enabled on a paid Gemini API project.")
+        print("    Text and image generation are unaffected.")
+        return 2
+
+    wanted = os.getenv("VEO_MODEL", "veo-3.1-generate-preview")
+    if wanted in veo:
+        print(f"\n  ✓ Configured VEO_MODEL '{wanted}' is available.")
+    else:
+        print(f"\n  ! Configured VEO_MODEL '{wanted}' is NOT in the list above.")
+        print(f"    Set VEO_MODEL in .env to one of them, e.g. {veo[0]}")
+        return 2
+    return 0
+
+
+async def generate(key: str) -> int:
+    import video_providers
+    from video_providers import ProviderError
+
+    provider = video_providers.get("veo")
+    duration = provider.normalise_duration(int(os.getenv("VEO_TEST_DURATION", "4")))
+    cost = provider.estimated_cost(duration)
+
+    print(f"\n→ About to generate a real {duration}s clip with {provider.model}.")
+    print(f"  Estimated cost: {'$%.2f' % cost if cost else 'unknown — VEO_COST_PER_SECOND is not set'}")
+    if input("  Type 'yes' to proceed: ").strip().lower() != "yes":
+        print("  Cancelled. Nothing was charged.")
+        return 0
+
+    try:
+        job = await provider.submit(
+            "A slow push-in on a cup of coffee on a wooden desk, morning light",
+            duration=duration, aspect_ratio="9:16",
+        )
+        print(f"  submitted: {job.provider_job_id}")
+
+        for attempt in range(60):
+            await asyncio.sleep(10)
+            job = await provider.poll(job.provider_job_id)
+            print(f"  [{attempt + 1:>2}] {job.status}")
+            if job.done:
+                break
+
+        if not job.ok:
+            print(f"\n  ✗ Failed: {job.error}")
+            return 1
+
+        data = await provider.download(job)
+        import media_store
+        asset = media_store.store_bytes(
+            data, declared_name="veo-preflight.mp4", origin="generated",
+            provider=f"veo:{provider.model}", title="Veo preflight test",
+            tags=["test", "veo"], cost_usd=cost,
+        )
+        print(f"\n  ✓ Video stored: {asset['path']}")
+        print(f"    Served at:    {asset['url']}")
+        print(f"    Asset id:     {asset['asset_id']}")
+        return 0
+
+    except ProviderError as e:
+        print(f"\n  ✗ {e.reason}")
+        return 1
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--generate", action="store_true",
+                    help="also generate one real clip (costs money, asks first)")
+    args = ap.parse_args()
+
+    key = os.getenv("GEMINI_API_KEY", "")
+    if not key:
+        print("✗ GEMINI_API_KEY is not set in .env")
+        return 1
+    print(f"GEMINI_API_KEY: present ({len(key)} chars)\n")
+
+    code = listing(key)
+    if code or not args.generate:
+        if not args.generate and code == 0:
+            print("\nAll good. Re-run with --generate to make one real clip.")
+        return code
+    return asyncio.run(generate(key))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
