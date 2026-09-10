@@ -61,6 +61,10 @@ mu.UPLOADS_DIR = SCRATCH / "uploads"
 
 import assets_routes as ar  # noqa: E402
 
+# Đợt 3 / E4: kho asset nay theo tổ chức. Bộ test dùng một mã cố định — nó chỉ
+# cần một giá trị NHẤT QUÁN để ghi vào rồi đọc lại, không cần tổ chức thật.
+TO_CHUC = "to-chuc-thu-nghiem"
+
 ar.DATABASE_PATH = str(DB)
 
 
@@ -74,14 +78,14 @@ def png(colour):
 def make_carousel(colours, topic):
     """Mimic /api/generate-carousel: a parent asset plus generated slides."""
     parent = inv.register_asset(asset_type="carousel", source="carousel-maker",
-                                title=topic, origin="generated")
+                                title=topic, origin="generated", organization_id=TO_CHUC)
     slides = []
     for c in colours:
         slides.append(ms.store_bytes(png(c), declared_name="slide.png",
                                      origin="generated", provider="test",
-                                     parent_asset_id=parent["asset_id"]))
+                                     parent_asset_id=parent["asset_id"], organization_id=TO_CHUC))
     inv.update_asset(parent["asset_id"],
-                     metadata={"slide_asset_ids": [s["asset_id"] for s in slides]})
+                     metadata={"slide_asset_ids": [s["asset_id"] for s in slides]}, organization_id=TO_CHUC)
     return parent["asset_id"], slides
 
 
@@ -109,23 +113,23 @@ check("both resolve to the same files",
       ar._carousel_slide_paths(c1), ar._carousel_slide_paths(c2))
 
 # a carousel from before the list existed still works via the back-pointer
-legacy = inv.register_asset(asset_type="carousel", source="old", title="legacy")
+legacy = inv.register_asset(asset_type="carousel", source="old", title="legacy", organization_id=TO_CHUC)
 ms.store_bytes(png((1, 2, 3)), declared_name="l1.png", origin="generated",
-               parent_asset_id=legacy["asset_id"])
+               parent_asset_id=legacy["asset_id"], organization_id=TO_CHUC)
 ms.store_bytes(png((4, 5, 6)), declared_name="l2.png", origin="generated",
-               parent_asset_id=legacy["asset_id"])
+               parent_asset_id=legacy["asset_id"], organization_id=TO_CHUC)
 check("legacy carousel falls back to parent_asset_id",
       len(ar._carousel_slide_paths(legacy["asset_id"])), 2)
 
 # ── metadata merge must not clobber ───────────────────────────────────────
-inv.update_asset(c1, metadata={"caption": "hello"})
-meta = json.loads(inv.get_asset(c1)["metadata"])
+inv.update_asset(c1, metadata={"caption": "hello"}, organization_id=TO_CHUC)
+meta = json.loads(inv.get_asset(c1, organization_id=TO_CHUC)["metadata"])
 check("metadata merge keeps slide_asset_ids", len(meta.get("slide_asset_ids", [])), 3)
 check("  and adds the new key", meta.get("caption"), "hello")
 
 # ── the gate a saved post has to pass ─────────────────────────────────────
 video = ms.store_bytes(b"\x00\x00\x00\x20ftypisom" + b"\x00" * 900,
-                       declared_name="reel.mp4", origin="generated", provider="slideshow")
+                       declared_name="reel.mp4", origin="generated", provider="slideshow", organization_id=TO_CHUC)
 check("video stored", video["asset_type"], "video")
 
 ok, err, media = mu.validate_publish_media("instagram", "reel", [video["path"]])

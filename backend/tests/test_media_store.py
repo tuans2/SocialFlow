@@ -32,6 +32,10 @@ if not (SCRATCH / "socialflow.db").exists():
 
 import media_store as ms  # noqa: E402
 
+# Đợt 3 / E4: kho asset nay theo tổ chức. Bộ test dùng một mã cố định — nó chỉ
+# cần một giá trị NHẤT QUÁN để ghi vào rồi đọc lại, không cần tổ chức thật.
+TO_CHUC = "to-chuc-thu-nghiem"
+
 ms.BACKEND_DIR = SCRATCH
 ms.UPLOADS_DIR = SCRATCH / "uploads"
 ms.THUMBS_DIR = ms.UPLOADS_DIR / "_thumbs"
@@ -66,7 +70,7 @@ check("sniff unknown -> None", ms.sniff(b"#!/bin/sh\nrm -rf /"), None)
 
 # ── happy path ────────────────────────────────────────────────────────────
 data = png_bytes()
-r1 = ms.store_bytes(data, declared_name="cover photo.png", title="Cover")
+r1 = ms.store_bytes(data, declared_name="cover photo.png", title="Cover", organization_id=TO_CHUC)
 check("png stored as image", r1["asset_type"], "image")
 check("  sha256 matches content", r1["sha256"], hashlib.sha256(data).hexdigest())
 check("  dimensions probed", (r1["width"], r1["height"]), (1080, 1350))
@@ -77,20 +81,20 @@ check("  thumbnail file exists", (SCRATCH / "uploads" / "_thumbs" / f"{r1['sha25
 check("  url is servable form", r1["url"].startswith("/uploads/"), True)
 
 # ── deduplication ─────────────────────────────────────────────────────────
-r2 = ms.store_bytes(data, declared_name="a completely different name.png")
+r2 = ms.store_bytes(data, declared_name="a completely different name.png", organization_id=TO_CHUC)
 check("identical bytes -> deduped", r2["deduped"], True)
 check("  same asset id", r2["asset_id"], r1["asset_id"])
 check("  only one file on disk", len(list((SCRATCH / "uploads").rglob("*.png"))), 1)
-check("  only one inventory row", len(inv.list_assets(limit=100, origin="uploaded")), 1)
+check("  only one inventory row", len(inv.list_assets(limit=100, origin="uploaded", organization_id=TO_CHUC)), 1)
 
-r3 = ms.store_bytes(png_bytes(colour=(200, 40, 90)), declared_name="other.png")
+r3 = ms.store_bytes(png_bytes(colour=(200, 40, 90)), declared_name="other.png", organization_id=TO_CHUC)
 check("different bytes -> new asset", r3["deduped"], False)
 check("  distinct asset id", r3["asset_id"] != r1["asset_id"], True)
 
 # ── refusals ──────────────────────────────────────────────────────────────
 def refuses(name, payload, expect_in=None, status=None):
     try:
-        ms.store_bytes(payload, declared_name=name)
+        ms.store_bytes(payload, declared_name=name, organization_id=TO_CHUC)
         check(f"refuse {name}", "stored", "rejected")
     except ms.MediaRejected as e:
         if expect_in:
@@ -113,38 +117,38 @@ check("rejected file leaves no orphan",
       any("garbage" in p.name for p in (SCRATCH / "uploads").rglob("*")), False)
 
 # ── a hostile filename cannot steer the path ──────────────────────────────
-r4 = ms.store_bytes(png_bytes(colour=(1, 2, 3)), declared_name="../../../../etc/passwd")
+r4 = ms.store_bytes(png_bytes(colour=(1, 2, 3)), declared_name="../../../../etc/passwd", organization_id=TO_CHUC)
 stored = (SCRATCH / r4["path"]).resolve()
 check("traversal filename ignored", str(stored).startswith(str((SCRATCH / "uploads").resolve())), True)
 check("  original name kept only as metadata",
-      inv.get_asset(r4["asset_id"])["metadata"].count("etc/passwd") >= 1, True)
+      inv.get_asset(r4["asset_id"], organization_id=TO_CHUC)["metadata"].count("etc/passwd") >= 1, True)
 
 # ── inventory columns are populated ───────────────────────────────────────
-row = inv.get_asset(r1["asset_id"])
+row = inv.get_asset(r1["asset_id"], organization_id=TO_CHUC)
 check("origin recorded", row["origin"], "uploaded")
 check("provider recorded", row["provider"], "user")
 check("sha256 recorded", row["sha256"], r1["sha256"])
 check("size recorded", row["file_size"], len(data))
 check("thumb path recorded", bool(row["thumb_path"]), True)
-check("lookup by hash works", inv.get_asset_by_sha256(r1["sha256"])["asset_id"], r1["asset_id"])
+check("lookup by hash works", inv.get_asset_by_sha256(r1["sha256"], organization_id=TO_CHUC)["asset_id"], r1["asset_id"])
 
 # ── archive is soft: hidden from listing, row and file both survive ───────
-inv.archive_asset(r3["asset_id"])
-listed = [a["asset_id"] for a in inv.list_assets(limit=100)]
+inv.archive_asset(r3["asset_id"], organization_id=TO_CHUC)
+listed = [a["asset_id"] for a in inv.list_assets(limit=100, organization_id=TO_CHUC)]
 check("archived hidden", r3["asset_id"] in listed, False)
-check("  row survives", inv.get_asset(r3["asset_id"])["state"], "archived")
+check("  row survives", inv.get_asset(r3["asset_id"], organization_id=TO_CHUC)["state"], "archived")
 check("  file survives", (SCRATCH / r3["path"]).is_file(), True)
 check("  visible when asked", r3["asset_id"] in
-      [a["asset_id"] for a in inv.list_assets(limit=100, include_archived=True)], True)
+      [a["asset_id"] for a in inv.list_assets(limit=100, include_archived=True, organization_id=TO_CHUC)], True)
 
 # ── editing metadata ──────────────────────────────────────────────────────
-inv.update_asset(r1["asset_id"], title="Renamed", tags=["cover", "q3"], campaign="launch")
-row = inv.get_asset(r1["asset_id"])
+inv.update_asset(r1["asset_id"], title="Renamed", tags=["cover", "q3"], campaign="launch", organization_id=TO_CHUC)
+row = inv.get_asset(r1["asset_id"], organization_id=TO_CHUC)
 check("title updated", row["title"], "Renamed")
 check("campaign updated", row["campaign"], "launch")
-check("tag filter matches whole token", len(inv.list_assets(tag="cover", limit=50)), 1)
-check("tag filter does not substring-match", len(inv.list_assets(tag="cov", limit=50)), 0)
-check("text search matches title", len(inv.list_assets(q="Renam", limit=50)), 1)
+check("tag filter matches whole token", len(inv.list_assets(tag="cover", limit=50, organization_id=TO_CHUC)), 1)
+check("tag filter does not substring-match", len(inv.list_assets(tag="cov", limit=50, organization_id=TO_CHUC)), 0)
+check("text search matches title", len(inv.list_assets(q="Renam", limit=50, organization_id=TO_CHUC)), 1)
 
 # ── nothing pre-existing was disturbed ────────────────────────────────────
 if (BACKEND / "socialflow.db").exists():

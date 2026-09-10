@@ -116,6 +116,42 @@ for ten in ROUTER_PHU:
 check("sáu router phụ đều gác bằng require_org", thieu_cong, [])
 
 
+# ── 5. Mọi lời gọi tầng dữ liệu đều mang organization_id ────────────────────
+# `asset_inventory` và `media_store` đòi `organization_id` là tham số chỉ-từ-khoá
+# BẮT BUỘC, nên thiếu nó là `TypeError` lúc chạy. Phép thử này bắt TRƯỚC khi
+# chạy: một nhánh hiếm (xử lý lỗi, đường quản trị) có thể không bao giờ được gọi
+# trong lúc thử tay, và lỗi chỉ nổ ở môi trường thật.
+CAN_ORG = {
+    "register_asset", "get_asset", "get_asset_by_sha256", "archive_asset",
+    "update_asset", "list_assets", "count_assets", "queue_content",
+    "list_queue", "update_queue_state",
+    "store_upload", "store_bytes", "store_path", "store_stream",
+}
+# Hai module ĐỊNH NGHĨA các hàm ấy được miễn: chúng gọi lẫn nhau bên trong, nơi
+# `organization_id` đã nằm sẵn trong phạm vi.
+MIEN = {"asset_inventory.py", "media_store.py"}
+
+thieu_org = []
+for tep in sorted(BACKEND.rglob("*.py")):
+    if any(x in tep.parts for x in ("venv", "__pycache__")) or tep.name in MIEN:
+        continue
+    try:
+        cay = ast.parse(tep.read_text(encoding="utf-8"))
+    except SyntaxError:
+        continue
+    for node in ast.walk(cay):
+        if not isinstance(node, ast.Call):
+            continue
+        ten = (
+            node.func.id if isinstance(node.func, ast.Name)
+            else node.func.attr if isinstance(node.func, ast.Attribute)
+            else None
+        )
+        if ten in CAN_ORG and "organization_id" not in {k.arg for k in node.keywords}:
+            thieu_org.append(f"{tep.relative_to(BACKEND)}:{node.lineno} {ten}()")
+check("mọi lời gọi tầng dữ liệu đều truyền organization_id", thieu_org, [])
+
+
 print("=" * 62)
 for n, g, w in FAIL:
     print(f"FAIL  {n}\n        got={g!r} want={w!r}")

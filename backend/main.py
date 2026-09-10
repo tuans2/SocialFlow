@@ -422,6 +422,7 @@ def _image_cost_usd():
 
 
 async def generate_image_asset(prompt: str, size: str = "1024x1024",
+                               *, organization_id: str,
                                save_as: str = None, title: str = "",
                                topic: str = "", campaign: str = "",
                                tags: list = None,
@@ -483,6 +484,7 @@ async def generate_image_asset(prompt: str, size: str = "1024x1024",
 
         return store_bytes(
             image_bytes,
+            organization_id=organization_id,
             declared_name=save_as,
             origin="generated",
             provider=model,
@@ -500,16 +502,19 @@ async def generate_image_asset(prompt: str, size: str = "1024x1024",
         )
 
 
-async def generate_image(prompt: str, size: str = "1024x1024", save_as: str = None) -> str:
+async def generate_image(prompt: str, size: str = "1024x1024", save_as: str = None,
+                         *, organization_id: str) -> str:
     """Generate an image; returns its stored path (backwards-compatible shape)."""
-    result = await generate_image_asset(prompt, size, save_as=save_as)
+    result = await generate_image_asset(prompt, size, save_as=save_as,
+                                        organization_id=organization_id)
     return result["path"]
 
 
 # Keep backward compat alias
-async def generate_image_dalle(prompt: str, size: str = "1024x1024") -> str:
+async def generate_image_dalle(prompt: str, size: str = "1024x1024",
+                               *, organization_id: str) -> str:
     """Backward-compatible wrapper — now uses GPT Image 1.5"""
-    path = await generate_image(prompt, size)
+    path = await generate_image(prompt, size, organization_id=organization_id)
     return path
 
 
@@ -1337,6 +1342,7 @@ Make it engaging, authentic, and optimized for maximum reach.{output_rules}"""
         try:
             asset = await generate_image_asset(
                 image_prompt, "1024x1024", save_as=filename,
+                organization_id=organization_id,
                 title=request.topic or filename,
                 topic=request.topic or "",
                 tags=["post", request.platform.lower()],
@@ -1412,6 +1418,7 @@ Return ONLY valid JSON, no other text."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     carousel_asset = register_asset(
+        organization_id=organization_id,
         asset_type="carousel",
         source="carousel-maker",
         title=request.topic,
@@ -1447,6 +1454,7 @@ Do NOT include any text in the image."""
             filename = f"carousel_{timestamp}_slide_{i+1}.png"
             asset = await generate_image_asset(
                 enhanced_prompt, "1024x1024", save_as=filename,
+                organization_id=organization_id,
                 title=f"{request.topic} — slide {i+1}",
                 topic=request.topic,
                 tags=["carousel", "slide", request.platform],
@@ -1475,6 +1483,7 @@ Do NOT include any text in the image."""
     ok_slides = [g for g in generated_images if g.get("image_path")]
     update_asset(
         carousel_asset_id,
+        organization_id=organization_id,
         description=(carousel_data.get("caption", "") or "")[:500],
         state="available" if len(ok_slides) == len(generated_images) else "partial",
         # The carousel owns its slide list. parent_asset_id alone cannot: when
@@ -1538,14 +1547,14 @@ async def _read_local_image(image_url: str) -> tuple:
     raise HTTPException(status_code=400, detail=f"Could not read image: {image_url}")
 
 
-def _carousel_slide_records(carousel_asset_id: str) -> List[dict]:
+def _carousel_slide_records(carousel_asset_id: str, *, organization_id: str) -> List[dict]:
     """Slide assets of a carousel, in order.
 
     Prefers the ordered id list stored on the carousel, which survives
     deduplication; falls back to the parent_asset_id back-pointer for
     carousels created before that list existed.
     """
-    carousel = get_asset(carousel_asset_id)
+    carousel = get_asset(carousel_asset_id, organization_id=organization_id)
     if carousel:
         try:
             meta = json.loads(carousel.get("metadata") or "{}")
@@ -1553,7 +1562,7 @@ def _carousel_slide_records(carousel_asset_id: str) -> List[dict]:
             meta = {}
         ids = meta.get("slide_asset_ids") or []
         if ids:
-            found = [get_asset(i) for i in ids]
+            found = [get_asset(i, organization_id=organization_id) for i in ids]
             return [f for f in found if f]
 
     conn = sqlite3.connect(DATABASE_PATH)
@@ -1569,27 +1578,28 @@ def _carousel_slide_records(carousel_asset_id: str) -> List[dict]:
     return [dict(r) for r in rows]
 
 
-def _slides_of_carousel(carousel_asset_id: str) -> List[str]:
+def _slides_of_carousel(carousel_asset_id: str, *, organization_id: str) -> List[str]:
     """Every slide of a carousel, in order, as absolute file paths."""
     resolved = []
-    for row in _carousel_slide_records(carousel_asset_id):
+    for row in _carousel_slide_records(carousel_asset_id, organization_id=organization_id):
         path = resolve_media_path(row.get("file_path"))
         if path:
             resolved.append(path)
     return resolved
 
 
-def _asset_file(asset_id: str) -> Optional[str]:
-    row = get_asset(asset_id) if asset_id else None
+def _asset_file(asset_id: str, *, organization_id: str) -> Optional[str]:
+    row = get_asset(asset_id, organization_id=organization_id) if asset_id else None
     return resolve_media_path(row["file_path"]) if row and row.get("file_path") else None
 
 
-def _slideshow_inputs(request) -> dict:
+def _slideshow_inputs(request, *, organization_id: str) -> dict:
     """Turn library references into the file paths the renderer needs."""
     images: List[str] = []
 
     if getattr(request, "carousel_asset_id", None):
-        images = _slides_of_carousel(request.carousel_asset_id)
+        images = _slides_of_carousel(request.carousel_asset_id,
+                                     organization_id=organization_id)
         if not images:
             raise HTTPException(
                 status_code=400,
@@ -1597,14 +1607,15 @@ def _slideshow_inputs(request) -> dict:
             )
 
     for ref in (getattr(request, "image_paths", None) or []):
-        path = _asset_file(ref) if str(ref).startswith("asset-") else resolve_media_path(ref)
+        path = (_asset_file(ref, organization_id=organization_id)
+                if str(ref).startswith("asset-") else resolve_media_path(ref))
         if not path:
             raise HTTPException(status_code=400, detail=f"Image not found: {ref}")
         images.append(path)
 
     audio = None
     if getattr(request, "audio_asset_id", None):
-        audio = _asset_file(request.audio_asset_id)
+        audio = _asset_file(request.audio_asset_id, organization_id=organization_id)
         if not audio:
             raise HTTPException(
                 status_code=400,
@@ -1634,7 +1645,8 @@ async def generate_video(request: VideoRequest, background_tasks: BackgroundTask
                 )
             image_bytes, image_mime = await _read_local_image(request.image_url)
 
-        extras = _slideshow_inputs(request) if provider.name == "slideshow" else {}
+        extras = (_slideshow_inputs(request, organization_id=organization_id)
+                  if provider.name == "slideshow" else {})
 
         job = await provider.submit(
             request.prompt,
@@ -1722,6 +1734,7 @@ async def check_video_status(task_id: str, organization_id: str = Depends(requir
         params = record.get("params") or {}
         asset = store_bytes(
             data,
+            organization_id=organization_id,
             declared_name=f"{record['job_id']}.mp4",
             origin="generated",
             provider=f"{provider.name}:{params.get('model') or ''}".rstrip(":"),
@@ -2039,10 +2052,12 @@ def _upload_response(result: dict) -> dict:
     }
 
 
-async def _ingest(file: UploadFile, *, expect: str = None, tags=None) -> dict:
+async def _ingest(file: UploadFile, *, organization_id: str, expect: str = None,
+                  tags=None) -> dict:
     """Shared ingest with a friendly error when the type is not what we want."""
     try:
-        result = await store_upload(file, origin="uploaded", provider="user",
+        result = await store_upload(file, organization_id=organization_id,
+                                    origin="uploaded", provider="user",
                                     tags=tags or [])
     except MediaRejected as e:
         raise HTTPException(status_code=e.status_code, detail=e.reason)
@@ -2059,14 +2074,16 @@ async def _ingest(file: UploadFile, *, expect: str = None, tags=None) -> dict:
 @app.post("/api/upload-avatar-photo")
 async def upload_avatar_photo(file: UploadFile = File(...), organization_id: str = Depends(require_org)):
     """Upload photo for avatar generation"""
-    result = await _ingest(file, expect="image", tags=["avatar"])
+    result = await _ingest(file, organization_id=organization_id,
+                           expect="image", tags=["avatar"])
     return _upload_response(result)
 
 
 @app.post("/api/upload-audio")
 async def upload_audio(file: UploadFile = File(...), organization_id: str = Depends(require_org)):
     """Upload audio for avatar/lip-sync"""
-    result = await _ingest(file, expect="audio", tags=["voiceover"])
+    result = await _ingest(file, organization_id=organization_id,
+                           expect="audio", tags=["voiceover"])
     return _upload_response(result)
 
 
@@ -2227,7 +2244,7 @@ async def publish_now(post_id: int, background_tasks: BackgroundTasks, organizat
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...), organization_id: str = Depends(require_org)):
     """Upload media file (any supported type)"""
-    result = await _ingest(file)
+    result = await _ingest(file, organization_id=organization_id)
     return _upload_response(result)
 
 # --- Config ---

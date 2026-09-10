@@ -26,6 +26,16 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 from video_providers import ProviderError  # noqa: E402
 from video_providers.heygen import HeyGenProvider  # noqa: E402
 
+# Đợt 3 / E4: `store_bytes` ghi asset theo tổ chức. Script kiểm tra tay này cần
+# một tổ chức THẬT để asset nó tạo ra nhìn thấy được trong giao diện — lấy từ
+# biến môi trường thay vì gắn cứng, vì mã tổ chức đổi giữa các lần dựng dữ liệu.
+TO_CHUC_KIEM_TRA = os.getenv("SOCIALFLOW_ORG_ID") or ""
+if not TO_CHUC_KIEM_TRA:
+    raise SystemExit(
+        "Thieu SOCIALFLOW_ORG_ID — dat bang organization_id that cua to chuc "
+        "muon gan asset kiem tra vao."
+    )
+
 
 async def inspect(provider) -> int:
     print("→ Checking the key and what this account can use…\n")
@@ -122,7 +132,7 @@ async def generate(provider) -> int:
         data, declared_name="heygen-preflight.mp4", origin="generated",
         provider="heygen", title="HeyGen preflight test",
         tags=["test", "heygen", "avatar"], cost_usd=cost,
-    )
+    organization_id=TO_CHUC_KIEM_TRA)
     print(f"\n  ✓ Video stored: {asset['path']}")
     print(f"    Served at:    {asset['url']}")
     print(f"    Asset id:     {asset['asset_id']}")

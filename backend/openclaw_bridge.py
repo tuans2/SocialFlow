@@ -68,7 +68,7 @@ def log_bridge_event(event: dict):
 
 
 @router.post("/publish")
-async def openclaw_publish(request: OpenClawPublishRequest):
+async def openclaw_publish(request: OpenClawPublishRequest, organization_id: str = Depends(require_org)):
     """
     Receive approved content from OpenClaw and publish to the specified platform.
     This is the main bridge endpoint.
@@ -125,7 +125,11 @@ async def openclaw_publish(request: OpenClawPublishRequest):
             kwargs["publication_url"] = sub_config.get("publication_url", "")
 
     try:
-        auto = get_automation_extended(platform, headless=True, **kwargs)
+        # D1/A5: `organization_id` chọn đúng tệp phiên Playwright của tổ chức
+        # này. Thiếu nó thì hai tổ chức dùng chung một phiên đăng nhập — tức
+        # đăng bài của tổ chức này lên tài khoản của tổ chức kia.
+        auto = get_automation_extended(platform, headless=True,
+                                       organization_id=organization_id, **kwargs)
 
         # Build post kwargs based on platform — only pass params each platform accepts
         post_kwargs = {"content": request.content}
@@ -189,11 +193,15 @@ async def openclaw_publish(request: OpenClawPublishRequest):
 
 
 @router.post("/batch")
-async def openclaw_batch_publish(request: BatchPublishRequest):
+async def openclaw_batch_publish(request: BatchPublishRequest, organization_id: str = Depends(require_org)):
     """Publish multiple items from OpenClaw in sequence"""
     results = []
     for item in request.items:
-        result = await openclaw_publish(item)
+        # Gọi thẳng như một hàm Python, KHÔNG qua FastAPI — nên phải truyền
+        # `organization_id` tường minh. Bỏ trống thì tham số nhận đúng đối
+        # tượng `Depends(...)` làm giá trị mặc định, và lỗi sẽ im lặng đi tiếp
+        # thay vì nổ ra.
+        result = await openclaw_publish(item, organization_id=organization_id)
         results.append(result)
     return {
         "total": len(results),

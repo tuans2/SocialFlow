@@ -126,7 +126,7 @@ async def trigger_generation(job_id: str):
 
 
 @router.post("/jobs/{job_id}/register-output")
-async def register_job_output(job_id: str, request: RegisterOutputRequest):
+async def register_job_output(job_id: str, request: RegisterOutputRequest, organization_id: str = Depends(require_org)):
     """
     Register the output of a completed HeyGen video.
     Call this after the video is downloaded/available from HeyGen.
@@ -138,6 +138,7 @@ async def register_job_output(job_id: str, request: RegisterOutputRequest):
 
     # Register as asset
     asset = register_asset(
+        organization_id=organization_id,
         asset_type="video",
         source="heygen",
         title=f"HeyGen Video: {job.get('topic', job_id)[:80]}",
@@ -186,7 +187,7 @@ async def register_job_output(job_id: str, request: RegisterOutputRequest):
 
 
 @router.post("/jobs/{job_id}/distribute")
-async def distribute_to_platforms(job_id: str, request: QueueVideoRequest):
+async def distribute_to_platforms(job_id: str, request: QueueVideoRequest, organization_id: str = Depends(require_org)):
     """
     Create platform-specific queue entries for a completed video.
     This routes the video to Instagram, YouTube, LinkedIn, etc.
@@ -210,6 +211,7 @@ async def distribute_to_platforms(job_id: str, request: QueueVideoRequest):
             continue
 
         q = queue_content(
+            organization_id=organization_id,
             platform=variant["platform"],
             content_type=variant["format"],
             caption=f"[Draft — needs platform copy] {variant['topic']}",
@@ -254,17 +256,19 @@ async def get_assets(
     asset_type: str = None,
     source: str = None,
     campaign: str = None,
-    limit: int = 50
+    limit: int = 50,
+    organization_id: str = Depends(require_org),
 ):
     """List assets in the inventory"""
-    assets = list_assets(asset_type=asset_type, source=source, campaign=campaign, limit=limit)
+    assets = list_assets(asset_type=asset_type, source=source, campaign=campaign,
+                         limit=limit, organization_id=organization_id)
     return {"assets": assets, "total": len(assets)}
 
 
 @router.get("/assets/{asset_id}")
-async def get_asset_details(asset_id: str):
+async def get_asset_details(asset_id: str, organization_id: str = Depends(require_org)):
     """Get details of a specific asset"""
-    asset = get_asset(asset_id)
+    asset = get_asset(asset_id, organization_id=organization_id)
     if not asset:
         raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
     return {"asset": asset}
@@ -277,26 +281,28 @@ async def get_content_queue(
     platform: str = None,
     state: str = None,
     campaign: str = None,
-    limit: int = 50
+    limit: int = 50,
+    organization_id: str = Depends(require_org),
 ):
     """List content queue items"""
-    items = list_queue(platform=platform, state=state, campaign=campaign, limit=limit)
+    items = list_queue(platform=platform, state=state, campaign=campaign,
+                       limit=limit, organization_id=organization_id)
     return {"queue": items, "total": len(items)}
 
 
 @router.post("/queue/{queue_id}/approve")
-async def approve_queue_item(queue_id: str):
+async def approve_queue_item(queue_id: str, organization_id: str = Depends(require_org)):
     """Approve a queue item for publishing"""
-    success = update_queue_state(queue_id, "approved")
+    success = update_queue_state(queue_id, "approved", organization_id=organization_id)
     if not success:
         raise HTTPException(status_code=404, detail=f"Queue item {queue_id} not found")
     return {"success": True, "queue_id": queue_id, "state": "approved"}
 
 
 @router.post("/queue/{queue_id}/publish")
-async def publish_queue_item(queue_id: str):
+async def publish_queue_item(queue_id: str, organization_id: str = Depends(require_org)):
     """Mark a queue item as published"""
-    success = update_queue_state(queue_id, "published")
+    success = update_queue_state(queue_id, "published", organization_id=organization_id)
     if not success:
         raise HTTPException(status_code=404, detail=f"Queue item {queue_id} not found")
     return {"success": True, "queue_id": queue_id, "state": "published"}

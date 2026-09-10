@@ -82,7 +82,8 @@ def _decorate(row: dict) -> dict:
 async def upload_assets(files: List[UploadFile] = File(...),
                         campaign: str = "",
                         topic: str = "",
-                        tags: str = ""):
+                        tags: str = "",
+                        organization_id: str = Depends(require_org)):
     """Upload one or more files into the media library.
 
     Each file is type-sniffed from its bytes, size-capped, hashed and deduped.
@@ -109,6 +110,7 @@ async def upload_assets(files: List[UploadFile] = File(...),
         try:
             result = await store_upload(
                 upload,
+                organization_id=organization_id,
                 origin="uploaded",
                 provider="user",
                 campaign=campaign,
@@ -147,56 +149,59 @@ async def browse_assets(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     include_archived: bool = False,
+    organization_id: str = Depends(require_org),
 ):
     """Browse the media library."""
     filters = dict(
         asset_type=asset_type, origin=origin, source=source, campaign=campaign,
         topic=topic, tag=tag, q=q, include_archived=include_archived,
     )
-    rows = list_assets(limit=limit, offset=offset, **filters)
+    rows = list_assets(limit=limit, offset=offset, organization_id=organization_id, **filters)
     return {
         "assets": [_decorate(r) for r in rows],
-        "total": count_assets(**filters),
+        "total": count_assets(organization_id=organization_id, **filters),
         "limit": limit,
         "offset": offset,
     }
 
 
 @router.get("/{asset_id}")
-async def read_asset(asset_id: str):
-    row = get_asset(asset_id)
+async def read_asset(asset_id: str, organization_id: str = Depends(require_org)):
+    row = get_asset(asset_id, organization_id=organization_id)
     if not row:
         raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
     return _decorate(row)
 
 
 @router.patch("/{asset_id}")
-async def edit_asset(asset_id: str, payload: AssetUpdate):
-    if not get_asset(asset_id):
+async def edit_asset(asset_id: str, payload: AssetUpdate, organization_id: str = Depends(require_org)):
+    if not get_asset(asset_id, organization_id=organization_id):
         raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
-    row = update_asset(asset_id, **payload.dict(exclude_none=True))
+    row = update_asset(
+        asset_id, organization_id=organization_id, **payload.dict(exclude_none=True)
+    )
     return _decorate(row)
 
 
 @router.delete("/{asset_id}")
-async def remove_asset(asset_id: str):
+async def remove_asset(asset_id: str, organization_id: str = Depends(require_org)):
     """Soft delete. The row and the file both survive, so any post already
     referencing this asset still publishes; it just stops appearing in the
     library."""
-    if not get_asset(asset_id):
+    if not get_asset(asset_id, organization_id=organization_id):
         raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
-    archive_asset(asset_id)
+    archive_asset(asset_id, organization_id=organization_id)
     return {"success": True, "asset_id": asset_id, "state": "archived"}
 
 
-def _carousel_slide_paths(carousel_asset_id: str) -> List[str]:
+def _carousel_slide_paths(carousel_asset_id: str, *, organization_id: str) -> List[str]:
     """Slides of a carousel, in order, as stored paths.
 
     Reads the ordered id list the carousel keeps, which survives
     deduplication, and falls back to the parent_asset_id back-pointer for
     carousels made before that list existed.
     """
-    carousel = get_asset(carousel_asset_id)
+    carousel = get_asset(carousel_asset_id, organization_id=organization_id)
     if carousel:
         try:
             meta = json.loads(carousel.get("metadata") or "{}")
@@ -206,7 +211,7 @@ def _carousel_slide_paths(carousel_asset_id: str) -> List[str]:
         if ids:
             paths = []
             for i in ids:
-                a = get_asset(i)
+                a = get_asset(i, organization_id=organization_id)
                 if a and a.get("file_path"):
                     paths.append(a["file_path"])
             if paths:
@@ -217,8 +222,8 @@ def _carousel_slide_paths(carousel_asset_id: str) -> List[str]:
     try:
         rows = conn.execute(
             "SELECT file_path FROM assets WHERE parent_asset_id = ? "
-            "AND asset_type = 'image' ORDER BY id",
-            (carousel_asset_id,),
+            "AND organization_id = ? AND asset_type = 'image' ORDER BY id",
+            (carousel_asset_id, organization_id),
         ).fetchall()
     finally:
         conn.close()
@@ -226,7 +231,7 @@ def _carousel_slide_paths(carousel_asset_id: str) -> List[str]:
 
 
 @router.post("/{asset_id}/to-post")
-async def asset_to_post(asset_id: str, payload: AssetToPost):
+async def asset_to_post(asset_id: str, payload: AssetToPost, organization_id: str = Depends(require_org)):
     """Turn an asset into a draft post.
 
     This is the step that was missing: video generated in the app landed in the
@@ -237,7 +242,7 @@ async def asset_to_post(asset_id: str, payload: AssetToPost):
     a draft that cannot be published is refused here rather than at 11pm when
     the scheduler tries it.
     """
-    asset = get_asset(asset_id)
+    asset = get_asset(asset_id, organization_id=organization_id)
     if not asset:
         raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
 
@@ -246,7 +251,7 @@ async def asset_to_post(asset_id: str, payload: AssetToPost):
     )
 
     if asset.get("asset_type") == "carousel":
-        media = _carousel_slide_paths(asset_id)
+        media = _carousel_slide_paths(asset_id, organization_id=organization_id)
         if not media:
             raise HTTPException(
                 status_code=400,
@@ -276,8 +281,8 @@ async def asset_to_post(asset_id: str, payload: AssetToPost):
     try:
         cur = conn.execute(
             """INSERT INTO posts (platform, content_type, content, media_paths,
-                                  scheduled_time, status)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+                                  scheduled_time, status, organization_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
                 payload.platform,
                 content_type,
@@ -285,6 +290,7 @@ async def asset_to_post(asset_id: str, payload: AssetToPost):
                 json.dumps(media),
                 payload.scheduled_time.isoformat() if payload.scheduled_time else None,
                 status,
+                organization_id,
             ),
         )
         post_id = cur.lastrowid

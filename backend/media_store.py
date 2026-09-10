@@ -255,10 +255,10 @@ class _Spool:
         return self._digest.hexdigest()
 
 
-def _finalize(spool: "_Spool", *, declared_name="", origin="uploaded",
-              provider="user", title="", description="", campaign="", topic="",
-              tags=None, cost_usd=None, parent_asset_id=None,
-              extra_metadata=None) -> dict:
+def _finalize(spool: "_Spool", *, organization_id: str, declared_name="",
+              origin="uploaded", provider="user", title="", description="",
+              campaign="", topic="", tags=None, cost_usd=None,
+              parent_asset_id=None, extra_metadata=None) -> dict:
     """Validate, place, probe and record a fully-spooled file."""
     spool.close()
 
@@ -276,7 +276,7 @@ def _finalize(spool: "_Spool", *, declared_name="", origin="uploaded",
     mime, ext, category = detected
     sha = spool.sha256
 
-    existing = get_asset_by_sha256(sha)
+    existing = get_asset_by_sha256(sha, organization_id=organization_id)
     if existing and _resolve_existing(existing.get("file_path")):
         return {
             "asset_id": existing["asset_id"],
@@ -326,6 +326,7 @@ def _finalize(spool: "_Spool", *, declared_name="", origin="uploaded",
     thumb = _make_thumb(dest, sha, category)
 
     asset = register_asset(
+        organization_id=organization_id,
         asset_type=ASSET_TYPE_BY_CATEGORY.get(category, category),
         source=provider or origin,
         title=title or (declared_name or dest.name),
@@ -366,10 +367,10 @@ def _finalize(spool: "_Spool", *, declared_name="", origin="uploaded",
 def _shared_with_other_assets(dest: Path) -> bool:
     """Is this file already referenced by a registered asset?"""
     try:
-        from asset_inventory import list_assets
-        rel = _rel(dest)
-        return any(a.get("file_path") == rel for a in list_assets(limit=100000,
-                                                                 include_archived=True))
+        from asset_inventory import dem_asset_tham_chieu_tep
+        # Cố ý XUYÊN TỔ CHỨC — xem doc-comment của hàm đó. Đây là câu hỏi về
+        # tệp trên đĩa, không phải về dữ liệu của một tổ chức.
+        return dem_asset_tham_chieu_tep(_rel(dest)) > 0
     except Exception:
         return False
 

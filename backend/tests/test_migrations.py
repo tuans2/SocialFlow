@@ -52,6 +52,10 @@ brand_kit.DB_PATH = db
 brand_kit.init_brand_tables()  # brand_config
 
 import analytics_store  # noqa: E402
+
+# Đợt 3 / E4: kho asset nay theo tổ chức. Bộ test dùng một mã cố định — nó chỉ
+# cần một giá trị NHẤT QUÁN để ghi vào rồi đọc lại, không cần tổ chức thật.
+TO_CHUC = "to-chuc-thu-nghiem"
 analytics_store.DATABASE_PATH = str(db)
 analytics_store.init_analytics_tables()  # post_metrics, weekly_metrics, content_insights
 
@@ -110,11 +114,11 @@ check("  nullable new column is NULL", legacy["sha256"], None)
 # register_asset must work against both shapes.
 inv.DATABASE_PATH = str(db)
 made = inv.register_asset(asset_type="image", source="test", sha256="deadbeef",
-                          origin="uploaded", provider="user")
+                          origin="uploaded", provider="user", organization_id=TO_CHUC)
 check("register_asset writes new columns",
-      inv.get_asset(made["asset_id"])["provider"], "user")
+      inv.get_asset(made["asset_id"], organization_id=TO_CHUC)["provider"], "user")
 check("  and they are queryable",
-      inv.get_asset_by_sha256("deadbeef")["asset_id"], made["asset_id"])
+      inv.get_asset_by_sha256("deadbeef", organization_id=TO_CHUC)["asset_id"], made["asset_id"])
 
 # A database missing the assets table must not raise, just report the skip.
 bare = scratch / "bare.db"

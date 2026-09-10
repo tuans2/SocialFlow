@@ -102,7 +102,9 @@ async def list_brief_types():
 
 
 @router.post("/generate")
-async def generate_visual_brief(request: VisualBriefRequest):
+async def generate_visual_brief(
+    request: VisualBriefRequest, organization_id: str = Depends(require_org)
+):
     """Generate a visual content brief using local LLM"""
 
     if request.brief_type not in BRIEF_TYPES:
@@ -138,6 +140,7 @@ async def generate_visual_brief(request: VisualBriefRequest):
 
                 # Register in asset inventory
                 asset = register_asset(
+                    organization_id=organization_id,
                     asset_type="visual-brief",
                     source=f"visual-{request.brief_type}",
                     title=f"{brief_info['name']}: {request.topic or request.content[:50]}",
@@ -210,10 +213,11 @@ async def auto_generate_visuals():
 
 
 @router.get("/briefs")
-async def list_visual_briefs(brief_type: str = None, limit: int = 50):
+async def list_visual_briefs(brief_type: str = None, limit: int = 50, organization_id: str = Depends(require_org)):
     """List generated visual briefs from the asset inventory"""
     source = f"visual-{brief_type}" if brief_type else None
-    assets = list_assets(asset_type="visual-brief", source=source, limit=limit)
+    assets = list_assets(asset_type="visual-brief", source=source, limit=limit,
+                         organization_id=organization_id)
     return {"briefs": assets, "total": len(assets)}
 
 
