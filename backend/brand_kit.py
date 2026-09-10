@@ -20,10 +20,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import Depends, APIRouter, HTTPException, UploadFile, File, Form
+
+from org_context import require_org
 from pydantic import BaseModel
 
-router = APIRouter(prefix="/api/brand", tags=["Brand Kit"])
+# Đợt 3 / E3 — cổng xác thực ở mức ROUTER: mọi route trong tệp này đòi một
+# JWT `floraos_sso` hợp lệ. Đây mới là lớp CHẶN; lớp LỌC theo tổ chức nằm ở
+# từng route (E4), và FastAPI nhớ kết quả phụ thuộc trong một request nên gọi
+# hai lần không tốn thêm gì.
+router = APIRouter(
+    prefix="/api/brand",
+    tags=["Brand Kit"],
+    dependencies=[Depends(require_org)],
+)
 
 DB_PATH = Path(__file__).parent / "socialflow.db"
 UPLOADS_DIR = Path(__file__).parent / "uploads"
@@ -132,7 +142,7 @@ class ProductItem(BaseModel):
 
 
 @router.get("/config")
-async def get_brand_config(organization_id: Optional[str] = None):
+async def get_brand_config(organization_id: str = Depends(require_org)):
     """Get this organization's brand configuration.
 
     An organization that has never saved its own brand kit gets a fresh
@@ -163,7 +173,7 @@ async def get_brand_config(organization_id: Optional[str] = None):
 
 
 @router.put("/config")
-async def update_brand_config(update: BrandUpdate, organization_id: Optional[str] = None):
+async def update_brand_config(update: BrandUpdate, organization_id: str = Depends(require_org)):
     """Update this organization's brand configuration.
 
     D1 A5: writes now target this organization's OWN row (created on first
@@ -199,7 +209,7 @@ async def update_brand_config(update: BrandUpdate, organization_id: Optional[str
 
 
 @router.post("/logo")
-async def upload_logo(file: UploadFile = File(...), organization_id: Optional[str] = None):
+async def upload_logo(file: UploadFile = File(...), organization_id: str = Depends(require_org)):
     """Upload this organization's brand logo."""
     org_id = organization_id or DEFAULT_ORGANIZATION_ID
     UPLOADS_DIR.mkdir(exist_ok=True)
@@ -225,7 +235,7 @@ async def upload_logo(file: UploadFile = File(...), organization_id: Optional[st
 
 
 @router.get("/colors")
-async def get_brand_colors(organization_id: Optional[str] = None):
+async def get_brand_colors(organization_id: str = Depends(require_org)):
     """Get this organization's brand color palette (for image generation)."""
     org_id = organization_id or DEFAULT_ORGANIZATION_ID
     init_brand_tables()
@@ -241,7 +251,7 @@ async def get_brand_colors(organization_id: Optional[str] = None):
 
 
 @router.get("/image-prompt-context")
-async def get_image_prompt_context(organization_id: Optional[str] = None):
+async def get_image_prompt_context(organization_id: str = Depends(require_org)):
     """Get this organization's brand context for enriching image generation prompts."""
     org_id = organization_id or DEFAULT_ORGANIZATION_ID
     init_brand_tables()

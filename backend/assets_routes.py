@@ -13,7 +13,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import Depends, APIRouter, File, HTTPException, Query, UploadFile
+
+from org_context import require_org
 from pydantic import BaseModel
 
 from asset_inventory import (
@@ -26,7 +28,15 @@ from asset_inventory import (
 from media_store import BACKEND_DIR, MediaRejected, public_url, store_upload
 from media_utils import resolve_media_path, validate_publish_media
 
-router = APIRouter(prefix="/api/assets", tags=["Media Library"])
+# Đợt 3 / E3 — cổng xác thực ở mức ROUTER: mọi route trong tệp này đòi một
+# JWT `floraos_sso` hợp lệ. Đây mới là lớp CHẶN; lớp LỌC theo tổ chức nằm ở
+# từng route (E4), và FastAPI nhớ kết quả phụ thuộc trong một request nên gọi
+# hai lần không tốn thêm gì.
+router = APIRouter(
+    prefix="/api/assets",
+    tags=["Media Library"],
+    dependencies=[Depends(require_org)],
+)
 
 MAX_FILES_PER_REQUEST = 20
 

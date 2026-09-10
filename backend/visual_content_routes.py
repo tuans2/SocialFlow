@@ -12,12 +12,22 @@ from datetime import datetime
 from typing import Optional, List
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import Depends, APIRouter, HTTPException
+
+from org_context import require_org
 from pydantic import BaseModel
 
 from asset_inventory import register_asset, list_assets
 
-router = APIRouter(prefix="/api/visual", tags=["Visual Content"])
+# Đợt 3 / E3 — cổng xác thực ở mức ROUTER: mọi route trong tệp này đòi một
+# JWT `floraos_sso` hợp lệ. Đây mới là lớp CHẶN; lớp LỌC theo tổ chức nằm ở
+# từng route (E4), và FastAPI nhớ kết quả phụ thuộc trong một request nên gọi
+# hai lần không tốn thêm gì.
+router = APIRouter(
+    prefix="/api/visual",
+    tags=["Visual Content"],
+    dependencies=[Depends(require_org)],
+)
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 VISUAL_SCRIPT = PROJECT_ROOT / "openclaw-engine" / "scripts" / "visual-brief-generator.sh"

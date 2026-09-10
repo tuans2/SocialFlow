@@ -15,8 +15,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form
+from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+
+from org_context import require_org
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -720,7 +722,11 @@ async def publish_scheduled_post(post_id: int):
     """Publish a scheduled post using browser automation"""
     conn = get_db()
     c = conn.cursor()
-    
+
+    # Chạy nền (nhóm d của `docs/KIEM_KE_ROUTE_DOT_3.md`): không có người dùng
+    # nào đứng sau, không có JWT nào để giải tổ chức. Bài được tra theo id và
+    # tổ chức ĐỌC RA TỪ CHÍNH BÀI ĐÓ (`post_org_id` ngay dưới), đúng cách A5
+    # đã làm — chứ không phải nhận tổ chức từ bên ngoài.
     c.execute("SELECT * FROM posts WHERE id = ?", (post_id,))
     post = dict(c.fetchone())
     post_org_id = post.get("organization_id") or DEFAULT_ORGANIZATION_ID
@@ -946,7 +952,7 @@ async def health_check():
 # ============== PIPELINE API ==============
 
 @app.post("/api/pipeline/run")
-async def api_run_pipeline(background_tasks: BackgroundTasks, organization_id: Optional[str] = None):
+async def api_run_pipeline(background_tasks: BackgroundTasks, organization_id: str = Depends(require_org)):
     """Run the full autonomous pipeline in background, for ONE organization
     (the dashboard button / manual on-demand run — the automatic schedule
     goes through run_scheduled_cycle() instead, see the scheduler jobs
@@ -970,18 +976,21 @@ async def api_run_pipeline(background_tasks: BackgroundTasks, organization_id: O
 
 
 @app.get("/api/pipeline/status")
-async def api_pipeline_status(organization_id: Optional[str] = None):
+async def api_pipeline_status(organization_id: str = Depends(require_org)):
     """Get this organization's pipeline status (A6 — status is per organization now)."""
     org_id = organization_id or DEFAULT_ORGANIZATION_ID
     return get_pipeline_status(org_id).to_dict()
 
 
 @app.get("/api/pipeline/queue")
-async def api_pipeline_queue(status_filter: str = None, platform: str = None):
+async def api_pipeline_queue(status_filter: str = None, platform: str = None, organization_id: str = Depends(require_org)):
     """Get content queue (drafts, approved, posted, failed)."""
     conn = get_db()
-    query = "SELECT * FROM posts WHERE 1=1"
-    params = []
+    # Đợt 3 / E4: tổ chức là mệnh đề ĐẦU TIÊN, không phải một bộ lọc tuỳ chọn
+    # thêm vào sau. Viết "WHERE 1=1" rồi nối điều kiện là cách một bộ lọc bắt
+    # buộc lặng lẽ biến mất khi ai đó thêm nhánh mới.
+    query = "SELECT * FROM posts WHERE organization_id = ?"
+    params = [organization_id]
     if status_filter:
         query += " AND status = ?"
         params.append(status_filter)
@@ -995,30 +1004,49 @@ async def api_pipeline_queue(status_filter: str = None, platform: str = None):
 
 
 @app.post("/api/pipeline/approve/{post_id}")
-async def api_approve_post(post_id: int):
+async def api_approve_post(post_id: int, organization_id: str = Depends(require_org)):
     """Manually approve a post."""
     conn = get_db()
-    conn.execute("UPDATE posts SET status = 'approved' WHERE id = ? AND status IN ('draft', 'review')", (post_id,))
+    cur = conn.execute(
+        "UPDATE posts SET status = 'approved' "
+        "WHERE id = ? AND organization_id = ? AND status IN ('draft', 'review')",
+        (post_id, organization_id),
+    )
     conn.commit()
+    thay_doi = cur.rowcount
     conn.close()
+    if thay_doi == 0:
+        # Bài của tổ chức khác, bài không tồn tại, và bài sai trạng thái trả
+        # CÙNG một đáp ứng — phân biệt chúng là xác nhận bản ghi có tồn tại
+        # (cùng luật YC-T4 của core).
+        raise HTTPException(status_code=404, detail="Post not found")
     return {"status": "approved", "post_id": post_id}
 
 
 @app.post("/api/pipeline/reject/{post_id}")
-async def api_reject_post(post_id: int):
+async def api_reject_post(post_id: int, organization_id: str = Depends(require_org)):
     """Reject a post."""
     conn = get_db()
-    conn.execute("UPDATE posts SET status = 'blocked' WHERE id = ?", (post_id,))
+    cur = conn.execute(
+        "UPDATE posts SET status = 'blocked' WHERE id = ? AND organization_id = ?",
+        (post_id, organization_id),
+    )
     conn.commit()
+    thay_doi = cur.rowcount
     conn.close()
+    if thay_doi == 0:
+        raise HTTPException(status_code=404, detail="Post not found")
     return {"status": "blocked", "post_id": post_id}
 
 
 @app.post("/api/pipeline/publish/{post_id}")
-async def api_publish_post(post_id: int, background_tasks: BackgroundTasks):
+async def api_publish_post(post_id: int, background_tasks: BackgroundTasks, organization_id: str = Depends(require_org)):
     """Publish a specific approved post immediately."""
     conn = get_db()
-    row = conn.execute("SELECT * FROM posts WHERE id = ? AND status = 'approved'", (post_id,)).fetchone()
+    row = conn.execute(
+        "SELECT * FROM posts WHERE id = ? AND organization_id = ? AND status = 'approved'",
+        (post_id, organization_id),
+    ).fetchone()
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="Post not found or not approved")
@@ -1051,7 +1079,7 @@ async def _publish_single_post(post: dict):
 
 
 @app.get("/api/pipeline/signals")
-async def api_get_signals(limit: int = 20):
+async def api_get_signals(limit: int = 20, organization_id: str = Depends(require_org)):
     """Get recent intelligence signals from Scout."""
     conn = get_db()
     try:
@@ -1064,7 +1092,7 @@ async def api_get_signals(limit: int = 20):
 
 
 @app.get("/api/pipeline/analytics")
-async def api_get_analytics(organization_id: Optional[str] = None):
+async def api_get_analytics(organization_id: str = Depends(require_org)):
     """Get this organization's daily analytics summary."""
     from agents.analyst import get_daily_stats, get_weekly_stats
     org_id = organization_id or DEFAULT_ORGANIZATION_ID
@@ -1076,7 +1104,7 @@ async def api_get_analytics(organization_id: Optional[str] = None):
 
 # --- Accounts ---
 @app.get("/api/accounts")
-async def get_accounts(organization_id: Optional[str] = None):
+async def get_accounts(organization_id: str = Depends(require_org)):
     """Get connected accounts for one organization (without passwords)."""
     org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = get_db()
@@ -1091,7 +1119,7 @@ async def get_accounts(organization_id: Optional[str] = None):
     return {"accounts": accounts}
 
 @app.post("/api/accounts")
-async def add_account(account: AccountCreate):
+async def add_account(account: AccountCreate, organization_id: str = Depends(require_org)):
     """Add account credentials for one organization.
 
     D1 (đa tenant thật, 2026-09-10): `accounts` was rebuilt with
@@ -1123,7 +1151,7 @@ async def add_account(account: AccountCreate):
     return {"success": True, "message": f"Account added for {account.platform}"}
 
 @app.post("/api/accounts/{platform}/login")
-async def login_account(platform: str, organization_id: Optional[str] = None):
+async def login_account(platform: str, organization_id: str = Depends(require_org)):
     """Login to a platform using saved credentials, scoped to one organization."""
     org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = get_db()
@@ -1161,7 +1189,7 @@ async def login_account(platform: str, organization_id: Optional[str] = None):
         return {"success": False, "message": str(e)}
 
 @app.post("/api/accounts/{platform}/check")
-async def check_login_status(platform: str, organization_id: Optional[str] = None):
+async def check_login_status(platform: str, organization_id: str = Depends(require_org)):
     """Check if still logged in to a platform, scoped to one organization."""
     org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = get_db()
@@ -1192,7 +1220,7 @@ async def check_login_status(platform: str, organization_id: Optional[str] = Non
         return {"logged_in": False, "error": str(e)}
 
 @app.delete("/api/accounts/{platform}")
-async def delete_account(platform: str, organization_id: Optional[str] = None):
+async def delete_account(platform: str, organization_id: str = Depends(require_org)):
     """Delete an account and its session, scoped to one organization."""
     org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = get_db()
@@ -1243,7 +1271,7 @@ Requirements:
 
 
 @app.post("/api/generate")
-async def generate_content(request: ContentRequest):
+async def generate_content(request: ContentRequest, organization_id: str = Depends(require_org)):
     """Generate AI content"""
     
     # Build prompt based on platform and content type
@@ -1333,7 +1361,7 @@ Make it engaging, authentic, and optimized for maximum reach.{output_rules}"""
 
 # --- Carousel Generation ---
 @app.post("/api/generate-carousel")
-async def generate_carousel(request: CarouselRequest):
+async def generate_carousel(request: CarouselRequest, organization_id: str = Depends(require_org)):
     """Generate a complete carousel with AI images and text"""
     
     # Step 1: Generate slide content with GPT-4
@@ -1587,7 +1615,7 @@ def _slideshow_inputs(request) -> dict:
 
 
 @app.post("/api/generate-video")
-async def generate_video(request: VideoRequest, background_tasks: BackgroundTasks = None):
+async def generate_video(request: VideoRequest, background_tasks: BackgroundTasks = None, organization_id: str = Depends(require_org)):
     """Start a video generation on the configured provider."""
     try:
         provider = video_providers.get(getattr(request, "provider", None))
@@ -1650,7 +1678,7 @@ async def generate_video(request: VideoRequest, background_tasks: BackgroundTask
 
 
 @app.get("/api/video-status/{task_id}")
-async def check_video_status(task_id: str):
+async def check_video_status(task_id: str, organization_id: str = Depends(require_org)):
     """Poll a generation, and store the video the moment it is ready.
 
     Downloading on completion is not an optimisation — Veo deletes generated
@@ -1756,7 +1784,7 @@ def _video_status_response(record: dict, asset: dict = None) -> dict:
 
 
 @app.get("/api/video-jobs")
-async def list_video_jobs(limit: int = 25, status: Optional[str] = None):
+async def list_video_jobs(limit: int = 25, status: Optional[str] = None, organization_id: str = Depends(require_org)):
     """Recent generations — what was made, by whom, and what it cost."""
     return {
         "jobs": video_job_store.recent(limit=limit, status=status),
@@ -1765,7 +1793,7 @@ async def list_video_jobs(limit: int = 25, status: Optional[str] = None):
 
 
 @app.post("/api/generate-reel")
-async def generate_reel(request: ReelRequest):
+async def generate_reel(request: ReelRequest, organization_id: str = Depends(require_org)):
     """Generate a complete reel: script + video"""
     
     # Step 1: Generate script with GPT-4
@@ -1884,7 +1912,7 @@ async def avatar_catalog():
 
 
 @app.post("/api/generate-avatar")
-async def generate_avatar(request: AvatarRequest):
+async def generate_avatar(request: AvatarRequest, organization_id: str = Depends(require_org)):
     """Generate a talking avatar video.
 
     Routed through the provider registry like every other video path. The
@@ -1952,7 +1980,7 @@ async def generate_avatar(request: AvatarRequest):
 
 
 @app.post("/api/generate-avatar-with-script")
-async def generate_avatar_with_script(request: AvatarScriptRequest):
+async def generate_avatar_with_script(request: AvatarScriptRequest, organization_id: str = Depends(require_org)):
     """Generate script + create avatar video"""
     
     # Step 1: Generate script with GPT-4
@@ -2029,14 +2057,14 @@ async def _ingest(file: UploadFile, *, expect: str = None, tags=None) -> dict:
 
 
 @app.post("/api/upload-avatar-photo")
-async def upload_avatar_photo(file: UploadFile = File(...)):
+async def upload_avatar_photo(file: UploadFile = File(...), organization_id: str = Depends(require_org)):
     """Upload photo for avatar generation"""
     result = await _ingest(file, expect="image", tags=["avatar"])
     return _upload_response(result)
 
 
 @app.post("/api/upload-audio")
-async def upload_audio(file: UploadFile = File(...)):
+async def upload_audio(file: UploadFile = File(...), organization_id: str = Depends(require_org)):
     """Upload audio for avatar/lip-sync"""
     result = await _ingest(file, expect="audio", tags=["voiceover"])
     return _upload_response(result)
@@ -2044,12 +2072,12 @@ async def upload_audio(file: UploadFile = File(...)):
 
 # --- Posts CRUD ---
 @app.get("/api/posts")
-async def get_posts(status: Optional[str] = None, platform: Optional[str] = None):
+async def get_posts(status: Optional[str] = None, platform: Optional[str] = None, organization_id: str = Depends(require_org)):
     conn = get_db()
     c = conn.cursor()
     
-    query = "SELECT * FROM posts WHERE 1=1"
-    params = []
+    query = "SELECT * FROM posts WHERE organization_id = ?"
+    params = [organization_id]
     
     if status:
         query += " AND status = ?"
@@ -2067,22 +2095,24 @@ async def get_posts(status: Optional[str] = None, platform: Optional[str] = None
     return {"posts": posts}
 
 @app.post("/api/posts")
-async def create_post(post: PostCreate):
+async def create_post(post: PostCreate, organization_id: str = Depends(require_org)):
     conn = get_db()
     c = conn.cursor()
     
     status = "scheduled" if post.scheduled_time else "draft"
     
     c.execute(
-        """INSERT INTO posts (platform, content_type, content, media_paths, scheduled_time, status)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO posts (platform, content_type, content, media_paths, scheduled_time, status,
+                              organization_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
             post.platform,
             post.content_type,
             post.content,
             json.dumps(post.media_paths) if post.media_paths else None,
             post.scheduled_time.isoformat() if post.scheduled_time else None,
-            status
+            status,
+            organization_id,
         )
     )
     
@@ -2102,7 +2132,7 @@ async def create_post(post: PostCreate):
     return {"id": post_id, "status": status}
 
 @app.put("/api/posts/{post_id}")
-async def update_post(post_id: int, update: PostUpdate):
+async def update_post(post_id: int, update: PostUpdate, organization_id: str = Depends(require_org)):
     conn = get_db()
     c = conn.cursor()
     
@@ -2122,20 +2152,33 @@ async def update_post(post_id: int, update: PostUpdate):
     
     if updates:
         params.append(post_id)
-        c.execute(f"UPDATE posts SET {', '.join(updates)} WHERE id = ?", params)
+        params.append(organization_id)
+        c.execute(
+            f"UPDATE posts SET {', '.join(updates)} WHERE id = ? AND organization_id = ?",
+            params,
+        )
         conn.commit()
-    
+        thay_doi = c.rowcount
+    else:
+        thay_doi = None
+
     conn.close()
+    if thay_doi == 0:
+        raise HTTPException(status_code=404, detail="Post not found")
     return {"updated": True}
 
 @app.delete("/api/posts/{post_id}")
-async def delete_post(post_id: int):
+async def delete_post(post_id: int, organization_id: str = Depends(require_org)):
     conn = get_db()
     c = conn.cursor()
-    c.execute("DELETE FROM posts WHERE id = ?", (post_id,))
+    c.execute("DELETE FROM posts WHERE id = ? AND organization_id = ?", (post_id, organization_id))
+    thay_doi = c.rowcount
     conn.commit()
     conn.close()
-    
+
+    if thay_doi == 0:
+        raise HTTPException(status_code=404, detail="Post not found")
+
     try:
         scheduler.remove_job(f"post_{post_id}")
     except Exception:
@@ -2144,11 +2187,14 @@ async def delete_post(post_id: int):
     return {"deleted": True}
 
 @app.post("/api/posts/{post_id}/publish")
-async def publish_now(post_id: int, background_tasks: BackgroundTasks):
+async def publish_now(post_id: int, background_tasks: BackgroundTasks, organization_id: str = Depends(require_org)):
     """Publish a post immediately"""
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM posts WHERE id = ?", (post_id,))
+    c.execute(
+        "SELECT * FROM posts WHERE id = ? AND organization_id = ?",
+        (post_id, organization_id),
+    )
     row = c.fetchone()
     if not row:
         conn.close()
@@ -2179,7 +2225,7 @@ async def publish_now(post_id: int, background_tasks: BackgroundTasks):
 
 # --- File Upload ---
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...), organization_id: str = Depends(require_org)):
     """Upload media file (any supported type)"""
     result = await _ingest(file)
     return _upload_response(result)
@@ -2219,7 +2265,7 @@ async def update_config(new_config: ConfigUpdate):
 
 # --- Extended Platform Login/Post (Facebook, Reddit, Medium, Substack, Discord, HeyGen, Email) ---
 @app.post("/api/accounts/{platform}/login-extended")
-async def login_extended(platform: str, organization_id: Optional[str] = None):
+async def login_extended(platform: str, organization_id: str = Depends(require_org)):
     """Login to extended platforms (Facebook, Reddit, Medium, Substack, HeyGen, beehiiv, etc.),
     scoped to one organization."""
     org_id = organization_id or DEFAULT_ORGANIZATION_ID
@@ -2260,11 +2306,14 @@ async def login_extended(platform: str, organization_id: Optional[str] = None):
 
 
 @app.post("/api/posts/{post_id}/publish-extended")
-async def publish_extended(post_id: int, background_tasks: BackgroundTasks):
+async def publish_extended(post_id: int, background_tasks: BackgroundTasks, organization_id: str = Depends(require_org)):
     """Publish a post via extended platform automation"""
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM posts WHERE id = ?", (post_id,))
+    c.execute(
+        "SELECT * FROM posts WHERE id = ? AND organization_id = ?",
+        (post_id, organization_id),
+    )
     post = c.fetchone()
     if not post:
         conn.close()

@@ -15,10 +15,20 @@ from datetime import datetime
 from typing import Optional, List
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import Depends, APIRouter, HTTPException
+
+from org_context import require_org
 from pydantic import BaseModel
 
-router = APIRouter(prefix="/api/openclaw", tags=["OpenClaw Bridge"])
+# Đợt 3 / E3 — cổng xác thực ở mức ROUTER: mọi route trong tệp này đòi một
+# JWT `floraos_sso` hợp lệ. Đây mới là lớp CHẶN; lớp LỌC theo tổ chức nằm ở
+# từng route (E4), và FastAPI nhớ kết quả phụ thuộc trong một request nên gọi
+# hai lần không tốn thêm gì.
+router = APIRouter(
+    prefix="/api/openclaw",
+    tags=["OpenClaw Bridge"],
+    dependencies=[Depends(require_org)],
+)
 
 
 class OpenClawPublishRequest(BaseModel):

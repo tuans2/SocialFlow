@@ -13,6 +13,7 @@ Data can be entered manually, via API, or automated later.
 """
 
 import os
+
 import sqlite3
 import json
 from datetime import datetime, timedelta
@@ -253,11 +254,17 @@ def generate_weekly_summary(week_start: str = None) -> dict:
 
 def register_analytics_routes(app):
     """Register analytics API endpoints on the FastAPI app"""
-    from fastapi import APIRouter
+    from fastapi import APIRouter, Depends
+
+    from org_context import require_org
     from pydantic import BaseModel
     from typing import Optional
 
-    router = APIRouter(prefix="/api/analytics", tags=["Analytics"])
+    router = APIRouter(
+        prefix="/api/analytics",
+        tags=["Analytics"],
+        dependencies=[Depends(require_org)],
+    )
 
     class MetricsInput(BaseModel):
         post_ref: str
@@ -285,19 +292,19 @@ def register_analytics_routes(app):
         return {"success": True, "result": result}
 
     @router.get("/platform/{platform}")
-    async def platform_perf(platform: str, days: int = 30, organization_id: Optional[str] = None):
+    async def platform_perf(platform: str, days: int = 30, organization_id: str = Depends(require_org)):
         return {"platform": platform, "data": get_platform_performance(platform, days, organization_id)}
 
     @router.get("/top-content-types")
-    async def top_types(days: int = 30, organization_id: Optional[str] = None):
+    async def top_types(days: int = 30, organization_id: str = Depends(require_org)):
         return {"data": get_top_content_types(days, organization_id)}
 
     @router.get("/pillars")
-    async def pillar_perf(days: int = 30, organization_id: Optional[str] = None):
+    async def pillar_perf(days: int = 30, organization_id: str = Depends(require_org)):
         return {"data": get_pillar_performance(days, organization_id)}
 
     @router.get("/weekly-summary")
-    async def weekly(week_start: str = None, organization_id: Optional[str] = None):
+    async def weekly(week_start: str = None, organization_id: str = Depends(require_org)):
         return generate_weekly_summary(week_start, organization_id)
 
     app.include_router(router)
