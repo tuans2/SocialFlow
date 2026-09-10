@@ -54,6 +54,17 @@ async def require_org(request: Request) -> str:
     return org
 
 
+async def sso_token_tho(request: Request) -> Optional[str]:
+    """JWT `floraos_sso` ở dạng THÔ, để chuyển tiếp sang core trong header
+    `X-FloraOS-SSO`. Không xác minh ở đây — `require_org` đã làm việc đó trên
+    cùng request, và FastAPI nhớ kết quả phụ thuộc nên không tốn thêm gì.
+
+    Trả `None` khi lời gọi không mang JWT nào (đường chạy nền). Bên gọi khi ấy
+    phải dùng token máy-gọi-máy của tổ chức.
+    """
+    return read_sso_token(request.headers, request.cookies)
+
+
 async def optional_org(request: Request) -> Optional[str]:
     """Cho route trung tính muốn ghi nhật ký theo tổ chức khi có, nhưng vẫn
     phục vụ được khi không có. KHÔNG dùng cho route đọc/ghi dữ liệu — ở đó

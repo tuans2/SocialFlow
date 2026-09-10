@@ -71,6 +71,17 @@ def get_brand_config(organization_id: Optional[str] = None) -> Dict:
     the hardcoded fallback below, not another organization's brand.
     """
     org_id = bat_buoc(organization_id)
+
+    # Đợt 3 / F3: core là nguồn cho phần chung của brand. Đồng bộ trước khi
+    # đọc, có TTL, và KHÔNG chặn khi core mất mạng — thứ đang chờ ở đây là
+    # một bài đăng, dừng nó vì core không trả lời là đổi một sự cố nhỏ lấy
+    # một sự cố lớn hơn.
+    try:
+        from brand_kit import dong_bo_brand_tu_core
+        dong_bo_brand_tu_core(org_id)
+    except Exception as e:  # noqa: BLE001 — đồng bộ hỏng không được làm hỏng lượt tạo nội dung
+        print(f"[Creator] bỏ qua đồng bộ brand từ core: {e}", flush=True)
+
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     try:
@@ -93,6 +104,27 @@ def get_brand_config(organization_id: Optional[str] = None) -> Dict:
         "tone": "clear, direct, practical, builder-minded",
         "forbidden_styles": "robot heads, stock photos, neon, clipart",
     }
+
+
+def _dong_cam(brand: Dict) -> str:
+    """Đợt 3 / F5 — `forbidden_styles` là RÀNG BUỘC, không phải gợi ý.
+
+    Đặc tả 08 mục 4b của core nói thẳng: "engine ngoài phải loại các kiểu nằm
+    trong danh sách đó TRƯỚC KHI SINH". Trước lượt này danh sách nằm trong
+    `brand_config` mà không đường nào đưa nó vào prompt — nó là dữ liệu chết.
+
+    Đặt ở CUỐI prompt có chủ đích: mô hình ngôn ngữ bám chỉ dẫn cuối cùng chặt
+    hơn chỉ dẫn giữa bài.
+    """
+    from brand_dong_bo import danh_sach_cam
+
+    cam = danh_sach_cam(brand)
+    if not cam:
+        return ""
+    return (
+        "\nHARD CONSTRAINT — do NOT produce any of these styles or motifs, "
+        "under any phrasing: " + ", ".join(cam) + ".\n"
+    )
 
 
 def build_prompt(plan: Dict, organization_id: Optional[str] = None) -> str:
@@ -118,7 +150,7 @@ Summary: {summary}
 
 Brand voice: {brand.get('tone', 'direct and practical')}
 Banned phrases: {banned_str}
-"""
+{_dong_cam(brand)}"""
     return prompt
 
 

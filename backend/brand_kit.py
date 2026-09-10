@@ -22,7 +22,7 @@ from typing import Optional, List
 
 from fastapi import Depends, APIRouter, HTTPException, UploadFile, File, Form
 
-from org_context import require_org
+from org_context import require_org, sso_token_tho
 from pydantic import BaseModel
 
 from to_chuc import bat_buoc
@@ -145,8 +145,81 @@ class ProductItem(BaseModel):
     description: str = ""
 
 
+TTL_DONG_BO_GIAY = int(os.getenv("FLORAOS_BRAND_SYNC_TTL_SECONDS", "300"))
+
+
+def dong_bo_brand_tu_core(organization_id: str, *, sso_token: str = None,
+                          bat_buoc_dong_bo: bool = False) -> bool:
+    """Kéo phần CHUNG của brand từ core về, ghi đè các cột core làm chủ.
+
+    Trả `True` nếu vừa đồng bộ, `False` nếu bỏ qua (còn trong TTL) hoặc không
+    gọi được core.
+
+    **Core không gọi được thì KHÔNG chặn.** Đây là chỗ cố ý làm ngược với
+    `LocalBudd`: ở đó lời gọi core là cổng hạn mức, chặn được thì phải chặn.
+    Ở đây thứ bị chặn sẽ là một bài đăng ĐÃ DUYỆT — dừng nó vì core mất mạng
+    là đổi một sự cố nhỏ lấy một sự cố lớn hơn. Dùng bản đã lưu, ghi log, đi
+    tiếp.
+
+    Chỉ ghi đè các cột trong `COT_CORE_LAM_CHU`. Phần riêng của SocialFlow
+    (brand_name, tagline, products_json, màu trạng thái…) không bị đụng tới.
+    """
+    from brand_dong_bo import COT_CORE_LAM_CHU, anh_xa_brand_profile
+    from floraos_core import (CoreClient, CoreKhongGoiDuoc, CoreTuChoi,
+                              client_chay_nen, client_thay_mat_nguoi_dung)
+
+    org_id = bat_buoc(organization_id)
+    init_brand_tables()
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    try:
+        row_id = get_or_create_brand_row(conn, org_id)
+        if not bat_buoc_dong_bo:
+            hang = conn.execute(
+                "SELECT core_synced_at FROM brand_config WHERE id = ?", (row_id,)
+            ).fetchone()
+            moc = hang["core_synced_at"] if hang and "core_synced_at" in hang.keys() else None
+            if moc:
+                try:
+                    da_qua = (datetime.now() - datetime.fromisoformat(moc)).total_seconds()
+                    if da_qua < TTL_DONG_BO_GIAY:
+                        return False
+                except ValueError:
+                    pass  # mốc hỏng thì cứ đồng bộ lại
+
+        try:
+            client = (client_thay_mat_nguoi_dung(sso_token) if sso_token
+                      else client_chay_nen(org_id))
+            ho_so = client.lay_brand_profile()
+        except (CoreKhongGoiDuoc, CoreTuChoi) as e:
+            print(f"[brand] không đồng bộ được từ core cho {org_id}: {e} "
+                  f"— dùng bản đã lưu", flush=True)
+            return False
+
+        cot = anh_xa_brand_profile(ho_so)
+        # Hồ sơ trống bên core → KHÔNG ghi gì. Ghi một dict toàn null sẽ xoá
+        # trắng brand kit đang dùng được.
+        if not cot:
+            return False
+
+        co_that = {r[1] for r in conn.execute("PRAGMA table_info(brand_config)")}
+        cot = {k: v for k, v in cot.items() if k in co_that and k in COT_CORE_LAM_CHU}
+        if not cot:
+            return False
+
+        cot["core_synced_at"] = datetime.now().isoformat()
+        menh_de = ", ".join(f"{k} = ?" for k in cot)
+        conn.execute(f"UPDATE brand_config SET {menh_de} WHERE id = ?",
+                     list(cot.values()) + [row_id])
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
 @router.get("/config")
-async def get_brand_config(organization_id: str = Depends(require_org)):
+async def get_brand_config(organization_id: str = Depends(require_org),
+                           sso_token: Optional[str] = Depends(sso_token_tho)):
     """Get this organization's brand configuration.
 
     An organization that has never saved its own brand kit gets a fresh
@@ -157,6 +230,9 @@ async def get_brand_config(organization_id: str = Depends(require_org)):
     """
     org_id = bat_buoc(organization_id)
     init_brand_tables()
+    # Đợt 3 / F3: kéo phần chung từ core trước khi đọc, có TTL. Không gọi được
+    # core thì hàm này trả False và ta đọc bản đã lưu — không chặn.
+    dong_bo_brand_tu_core(org_id, sso_token=sso_token)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     get_or_create_brand_row(conn, org_id)
@@ -195,6 +271,21 @@ async def update_brand_config(update: BrandUpdate, organization_id: str = Depend
     for key, value in update.dict(exclude_unset=True).items():
         if value is not None:
             fields[key] = value
+
+    # Đợt 3 / F4: các cột do core làm chủ KHÔNG sửa được ở đây. Cho sửa thì
+    # lần đồng bộ kế tiếp ghi đè lặng lẽ, và người dùng mất công vô ích mà
+    # không hiểu vì sao — tệ hơn là bị từ chối thẳng.
+    from brand_dong_bo import COT_CORE_LAM_CHU
+    bi_khoa = sorted(set(fields) & COT_CORE_LAM_CHU)
+    if bi_khoa:
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Các trường này do FloraOS làm chủ, sửa ở FloraOS chứ không ở "
+                f"đây: {', '.join(bi_khoa)}"
+            ),
+        )
 
     if not fields:
         conn.close()

@@ -64,6 +64,7 @@ from media_utils import (
 )
 
 from to_chuc import bat_buoc
+from usage_bao_cao import TINH_NANG_ANH, TINH_NANG_VIDEO, bao_usage
 SESSIONS_DIR = Path("sessions")
 SESSIONS_DIR.mkdir(exist_ok=True)
 
@@ -491,7 +492,7 @@ async def generate_image_asset(prompt: str, size: str = "1024x1024",
         if not save_as:
             save_as = f"generated-{datetime.now().strftime('%Y%m%d-%H%M%S')}.png"
 
-        return store_bytes(
+        ket_qua = store_bytes(
             image_bytes,
             organization_id=organization_id,
             declared_name=save_as,
@@ -509,6 +510,14 @@ async def generate_image_asset(prompt: str, size: str = "1024x1024",
                 "quality": quality,
             },
         )
+
+        # Đợt 3 / G2: báo chi phí về core. Chỉ báo khi thật sự SINH ra ảnh mới
+        # — `deduped` nghĩa là kho trả lại asset đã có, không tốn lượt gọi nào.
+        if not ket_qua.get("deduped"):
+            bao_usage(organization_id, feature=TINH_NANG_ANH,
+                      cost_usd=_image_cost_usd(),
+                      job_id=ket_qua.get("asset_id"))
+        return ket_qua
 
 
 async def generate_image(prompt: str, size: str = "1024x1024", save_as: str = None,
@@ -1772,6 +1781,8 @@ async def check_video_status(task_id: str, organization_id: str = Depends(requir
                                         video_url=job.video_url)
         return _video_status_response(record)
 
+    bao_usage(organization_id, feature=TINH_NANG_VIDEO,
+              cost_usd=(record or {}).get("cost_usd"), job_id=task_id)
     record = video_job_store.update(task_id, organization_id=organization_id,
                                     status=JobStatus.SUCCEEDED,
                                     asset_id=asset["asset_id"], video_url=asset["url"])

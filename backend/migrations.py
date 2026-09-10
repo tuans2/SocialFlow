@@ -104,6 +104,15 @@ COLUMNS: List[Tuple[str, str, str]] = [
     # dùng cho `password_encrypted`.
     ("accounts", "page_id", "TEXT"),
     ("accounts", "page_token_encrypted", "TEXT"),
+    # Đợt 3 / F1 — ba trường của `brand_profiles` bên core chưa có chỗ nhận
+    # trong `brand_config`. Không thêm thì màu nhấn, màu chữ và font thân bài
+    # do người dùng đặt ở core sẽ rơi mất trên đường sang đây.
+    ("brand_config", "accent_color", "TEXT"),
+    ("brand_config", "text_color", "TEXT"),
+    ("brand_config", "body_font", "TEXT"),
+    # Đợt 3 / F3 — mốc đồng bộ gần nhất với core, để TTL không phải đoán từ
+    # `updated_at` (cột đó cũng đổi khi người dùng sửa phần RIÊNG).
+    ("brand_config", "core_synced_at", "TEXT"),
 ]
 
 # Tables this module owns outright (asset_inventory.py owns the older ones).

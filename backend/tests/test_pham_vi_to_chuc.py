@@ -184,6 +184,30 @@ for tep in sorted(BACKEND.rglob("*.py")):
 check("tham số SQL luôn là tuple, không phải chuỗi trần", sql_sai, [])
 
 
+# ── 7. Không còn tổ chức mặc định ở đâu cả ─────────────────────────────────
+# `COALESCE(organization_id, ?) = ?` khiến MỌI hàng NULL khớp với BẤT KỲ tổ
+# chức nào hỏi. Vô hại với một tổ chức; là toàn bộ dữ liệu cũ lộ cho cả hai
+# khi có tổ chức thứ hai. `migrations.py` được miễn: mã di trú ở đó chuẩn hoá
+# dữ liệu CŨ một lần, không phải một đường đọc đang sống.
+# Ba tệp được miễn vì chúng MÔ TẢ khuôn mẫu này chứ không dùng nó:
+# `migrations.py` chuẩn hoá dữ liệu cũ một lần, `to_chuc.py` giải thích vì sao
+# khuôn mẫu bị bỏ, và chính tệp test này.
+MIEN_MAC_DINH = {"migrations.py", "to_chuc.py", "test_pham_vi_to_chuc.py"}
+
+con_mac_dinh = []
+for tep in sorted(BACKEND.rglob("*.py")):
+    if any(x in tep.parts for x in ("venv", "__pycache__")) or tep.name in MIEN_MAC_DINH:
+        continue
+    for so, dong in enumerate(tep.read_text(encoding="utf-8").splitlines(), 1):
+        if dong.lstrip().startswith("#"):
+            continue
+        if "COALESCE(organization_id" in dong:
+            con_mac_dinh.append(f"{tep.relative_to(BACKEND)}:{so} COALESCE")
+        elif "or DEFAULT_ORGANIZATION_ID" in dong:
+            con_mac_dinh.append(f"{tep.relative_to(BACKEND)}:{so} mặc định")
+check("không còn COALESCE tổ chức hay tổ chức mặc định", con_mac_dinh, [])
+
+
 print("=" * 62)
 for n, g, w in FAIL:
     print(f"FAIL  {n}\n        got={g!r} want={w!r}")
