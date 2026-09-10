@@ -19,10 +19,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
+from to_chuc import bat_buoc
+
 DB_PATH = Path(__file__).parent.parent / "socialflow.db"
 
 # Cung hang so voi migrations.py/main.py/orchestrator.py.
-DEFAULT_ORGANIZATION_ID = os.getenv("SOCIALFLOW_DEFAULT_ORGANIZATION_ID", "default")
 
 # Platform-specific prompt templates
 PLATFORM_PROMPTS = {
@@ -69,13 +70,13 @@ def get_brand_config(organization_id: Optional[str] = None) -> Dict:
     recently). An organization that has never saved its own brand kit gets
     the hardcoded fallback below, not another organization's brand.
     """
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
-            "SELECT * FROM brand_config WHERE COALESCE(organization_id, ?) = ? ORDER BY id DESC LIMIT 1",
-            (DEFAULT_ORGANIZATION_ID, org_id)
+            "SELECT * FROM brand_config WHERE organization_id = ? ORDER BY id DESC LIMIT 1",
+            (org_id,)
         ).fetchone()
         if row:
             return dict(row)
@@ -148,7 +149,7 @@ def save_draft(platform: str, content: str, content_type: str,
                signal_url: str = "", plan_id: int = None,
                organization_id: Optional[str] = None):
     """Save a draft post to the posts table, tagged to the organization that requested it."""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute(
         """INSERT INTO posts (platform, content_type, content, status, created_at, organization_id)
@@ -172,7 +173,7 @@ async def run(ai_generate_fn=None, organization_id: Optional[str] = None):
     """
     from agents.planner import get_pending_plans, mark_plan_completed
 
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     print(f"[Creator] Starting at {datetime.now().strftime('%H:%M:%S')} for org '{org_id}'")
 
     plans = get_pending_plans(organization_id=org_id, limit=10)

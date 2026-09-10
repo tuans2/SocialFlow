@@ -25,6 +25,8 @@ from fastapi import Depends, APIRouter, HTTPException, UploadFile, File, Form
 from org_context import require_org
 from pydantic import BaseModel
 
+from to_chuc import bat_buoc
+
 # Đợt 3 / E3 — cổng xác thực ở mức ROUTER: mọi route trong tệp này đòi một
 # JWT `floraos_sso` hợp lệ. Đây mới là lớp CHẶN; lớp LỌC theo tổ chức nằm ở
 # từng route (E4), và FastAPI nhớ kết quả phụ thuộc trong một request nên gọi
@@ -39,7 +41,6 @@ DB_PATH = Path(__file__).parent / "socialflow.db"
 UPLOADS_DIR = Path(__file__).parent / "uploads"
 
 # Cung hang so voi migrations.py/main.py/orchestrator.py.
-DEFAULT_ORGANIZATION_ID = os.getenv("SOCIALFLOW_DEFAULT_ORGANIZATION_ID", "default")
 
 
 def init_brand_tables():
@@ -71,8 +72,11 @@ def init_brand_tables():
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )''')
 
-    # Seed ONE default row (organization_id NULL -> DEFAULT_ORGANIZATION_ID via
-    # COALESCE everywhere this table is read). D1 A5: brand_config is one row
+    # Hàng mầm này có `organization_id` NULL. Từ Đợt 3/E7 mọi truy vấn lọc
+    # theo tổ chức chặt, nên nó VÔ HÌNH cho tới khi H1 gán nó cho một tổ chức
+    # thật. Nó mang danh mục sản phẩm của thương hiệu gốc (InBharat AI) — sau
+    # H1 nó sẽ thành brand kit của AVI GIFT, cần rà lại nội dung.
+    # D1 A5: brand_config is one row
     # PER ORGANIZATION now, not one shared row -- an organization other than
     # the default one gets its own row lazily, the first time it saves or
     # reads its brand kit (see get_or_create_brand_row / the /config routes
@@ -105,8 +109,8 @@ def get_or_create_brand_row(conn: sqlite3.Connection, organization_id: str) -> i
     overwrite that same shared row for everyone.
     """
     row = conn.execute(
-        "SELECT id FROM brand_config WHERE COALESCE(organization_id, ?) = ? ORDER BY id DESC LIMIT 1",
-        (DEFAULT_ORGANIZATION_ID, organization_id)
+        "SELECT id FROM brand_config WHERE organization_id = ? ORDER BY id DESC LIMIT 1",
+        (organization_id,)
     ).fetchone()
     if row:
         return row[0]
@@ -151,14 +155,14 @@ async def get_brand_config(organization_id: str = Depends(require_org)):
     the brand settings page for a brand-new organization still shows
     editable defaults instead of a 404.
     """
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     init_brand_tables()
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     get_or_create_brand_row(conn, org_id)
     row = conn.execute(
-        "SELECT * FROM brand_config WHERE COALESCE(organization_id, ?) = ? ORDER BY id DESC LIMIT 1",
-        (DEFAULT_ORGANIZATION_ID, org_id)
+        "SELECT * FROM brand_config WHERE organization_id = ? ORDER BY id DESC LIMIT 1",
+        (org_id,)
     ).fetchone()
     conn.close()
     if not row:
@@ -181,7 +185,7 @@ async def update_brand_config(update: BrandUpdate, organization_id: str = Depend
     organization's edits landed on the single most-recently-saved row,
     silently overwriting whichever organization had saved last.
     """
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     init_brand_tables()
     conn = sqlite3.connect(str(DB_PATH))
     row_id = get_or_create_brand_row(conn, org_id)
@@ -211,7 +215,7 @@ async def update_brand_config(update: BrandUpdate, organization_id: str = Depend
 @router.post("/logo")
 async def upload_logo(file: UploadFile = File(...), organization_id: str = Depends(require_org)):
     """Upload this organization's brand logo."""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     UPLOADS_DIR.mkdir(exist_ok=True)
     # Filename includes the organization so two organizations' logos don't
     # overwrite the same file on disk (D1 A5 — was a single shared filename).
@@ -237,14 +241,14 @@ async def upload_logo(file: UploadFile = File(...), organization_id: str = Depen
 @router.get("/colors")
 async def get_brand_colors(organization_id: str = Depends(require_org)):
     """Get this organization's brand color palette (for image generation)."""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     init_brand_tables()
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         "SELECT primary_color, secondary_color, dark_bg, light_bg, success_color, warning_color, danger_color "
-        "FROM brand_config WHERE COALESCE(organization_id, ?) = ? ORDER BY id DESC LIMIT 1",
-        (DEFAULT_ORGANIZATION_ID, org_id)
+        "FROM brand_config WHERE organization_id = ? ORDER BY id DESC LIMIT 1",
+        (org_id,)
     ).fetchone()
     conn.close()
     return dict(row) if row else {}
@@ -253,14 +257,14 @@ async def get_brand_colors(organization_id: str = Depends(require_org)):
 @router.get("/image-prompt-context")
 async def get_image_prompt_context(organization_id: str = Depends(require_org)):
     """Get this organization's brand context for enriching image generation prompts."""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     init_brand_tables()
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         "SELECT brand_name, primary_color, secondary_color, dark_bg, tone, forbidden_styles "
-        "FROM brand_config WHERE COALESCE(organization_id, ?) = ? ORDER BY id DESC LIMIT 1",
-        (DEFAULT_ORGANIZATION_ID, org_id)
+        "FROM brand_config WHERE organization_id = ? ORDER BY id DESC LIMIT 1",
+        (org_id,)
     ).fetchone()
     conn.close()
     if not row:

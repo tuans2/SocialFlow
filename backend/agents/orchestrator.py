@@ -19,10 +19,11 @@ from typing import Callable, Dict, List, Optional
 
 from agents import scout, planner, creator, reviewer, publisher, analyst
 
+from to_chuc import bat_buoc
+
 # Cung hang so voi migrations.py, analytics_store.py, main.py -- to chuc
 # khong truyen organization_id thi coi la to chuc mac dinh (tuong thich
 # nguoc voi du lieu truoc D1).
-DEFAULT_ORGANIZATION_ID = os.getenv("SOCIALFLOW_DEFAULT_ORGANIZATION_ID", "default")
 
 # A6 (Unified Shell Sec 7): so to chuc chay cung mot luc trong lich tu dong.
 # A2 chot "lo song song co gioi han" (vd 5-10) thay vi tuan tu tung to chuc --
@@ -83,7 +84,7 @@ _status_by_org: Dict[str, "PipelineStatus"] = {}
 
 def get_status(organization_id: Optional[str] = None) -> "PipelineStatus":
     """Return (creating if needed) the PipelineStatus for one organization."""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     if org_id not in _status_by_org:
         _status_by_org[org_id] = PipelineStatus()
     return _status_by_org[org_id]
@@ -97,21 +98,22 @@ def list_known_organizations() -> List[str]:
     organization MUST have at least one row in to ever publish anything
     (Phase 1 rebuilt it as UNIQUE(organization_id, platform)) -- so it
     doubles as the roster of "organizations actually using this instance."
-    Falls back to [DEFAULT_ORGANIZATION_ID] so a fresh install with no
-    accounts yet still runs the historical single-organization behavior.
+    Đợt 3 / E7: KHÔNG còn đường rơi về một tổ chức mặc định. Cài đặt mới chưa
+    có tài khoản nào thì danh sách RỖNG và lịch tự động không chạy gì cả —
+    đúng hơn là chạy toàn bộ pipeline cho một tổ chức tên "default" không tồn
+    tại bên core, sinh ra dữ liệu không ai nhận.
     """
     conn = sqlite3.connect(str(DB_PATH))
     try:
         rows = conn.execute(
-            "SELECT DISTINCT COALESCE(organization_id, ?) FROM accounts",
-            (DEFAULT_ORGANIZATION_ID,)
+            "SELECT DISTINCT organization_id FROM accounts "
+            "WHERE organization_id IS NOT NULL AND organization_id != ''"
         ).fetchall()
     except sqlite3.OperationalError:
         rows = []
     finally:
         conn.close()
-    orgs = sorted({r[0] for r in rows if r[0]})
-    return orgs or [DEFAULT_ORGANIZATION_ID]
+    return sorted({r[0] for r in rows if r[0]})
 
 
 async def run_full_pipeline(ai_generate_fn: Callable = None,
@@ -141,7 +143,7 @@ async def run_full_pipeline(ai_generate_fn: Callable = None,
     only the SAME organization calling it twice while its own run is still
     in flight gets the busy-rejection A3 added.
     """
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     status = get_status(org_id)
 
     if status.running:

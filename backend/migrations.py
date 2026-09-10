@@ -93,6 +93,17 @@ COLUMNS: List[Tuple[str, str, str]] = [
     ("content_queue", "organization_id", "TEXT"),
     ("assets", "organization_id", "TEXT"),
     ("brand_config", "organization_id", "TEXT"),
+    # Đợt 3 / E5. Bảng này LỌT khỏi A4: nó do chính migrations.py dựng
+    # (TABLES bên dưới) chứ không do asset_inventory.py, nên không nằm trong
+    # danh sách sáu bảng A4 rà. Nó mang cả `cost_usd`, nên vừa là lỗ tenant
+    # vừa là nguồn số liệu cho phần báo usage về core (Nhóm G).
+    ("video_jobs", "organization_id", "TEXT"),
+    # Đợt 3 / E6 — Facebook Page theo từng tổ chức. Trước đó Graph API đọc một
+    # cặp Page ID/token duy nhất từ biến môi trường của máy chủ, nên mọi tổ
+    # chức đăng qua cùng một Page. Token mã hoá bằng đúng khoá Fernet đang
+    # dùng cho `password_encrypted`.
+    ("accounts", "page_id", "TEXT"),
+    ("accounts", "page_token_encrypted", "TEXT"),
 ]
 
 # Tables this module owns outright (asset_inventory.py owns the older ones).
@@ -114,6 +125,7 @@ TABLES = {
             video_url TEXT,
             cost_usd REAL,
             error TEXT,
+            organization_id TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
@@ -155,6 +167,7 @@ INDEXES: List[Tuple[str, str, str]] = [
     ("idx_content_queue_org", "content_queue", "organization_id"),
     ("idx_assets_org", "assets", "organization_id"),
     ("idx_brand_config_org", "brand_config", "organization_id"),
+    ("idx_video_jobs_org", "video_jobs", "organization_id"),
 ]
 
 

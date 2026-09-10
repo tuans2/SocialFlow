@@ -62,6 +62,8 @@ from media_utils import (
     to_public_url,
     validate_publish_media,
 )
+
+from to_chuc import bat_buoc
 SESSIONS_DIR = Path("sessions")
 SESSIONS_DIR.mkdir(exist_ok=True)
 
@@ -74,7 +76,6 @@ SESSIONS_DIR.mkdir(exist_ok=True)
 # which preserves today's single-operator behaviour), but nothing yet
 # verifies that the caller is entitled to the organization it names. See
 # TECHNICAL_DEBT.md.
-DEFAULT_ORGANIZATION_ID = os.getenv("SOCIALFLOW_DEFAULT_ORGANIZATION_ID", "default")
 
 # Encryption for credentials
 def get_or_create_key():
@@ -171,7 +172,15 @@ class AccountCreate(BaseModel):
     platform: str
     username: str
     password: str
+    # Đợt 3 / E7: `organization_id` KHÔNG còn đọc từ đây. Tổ chức đến từ JWT
+    # đã xác minh. Giữ lại trường để client cũ gửi lên không bị 422, nhưng giá
+    # trị bị BỎ QUA — đặc tả 08 mục 3 của core: bỏ qua chứ không trả lỗi, vì
+    # trả lỗi cho biết trường đó có tồn tại và có tác dụng.
     organization_id: Optional[str] = None
+    # Đợt 3 / E6 — chỉ dùng cho platform="facebook": Page riêng của tổ chức,
+    # thay cho cặp FB_PAGE_ID/FB_PAGE_ACCESS_TOKEN dùng chung toàn máy chủ.
+    page_id: Optional[str] = None
+    page_access_token: Optional[str] = None
 
 class ContentRequest(BaseModel):
     topic: str
@@ -734,7 +743,7 @@ async def publish_scheduled_post(post_id: int):
     # đã làm — chứ không phải nhận tổ chức từ bên ngoài.
     c.execute("SELECT * FROM posts WHERE id = ?", (post_id,))
     post = dict(c.fetchone())
-    post_org_id = post.get("organization_id") or DEFAULT_ORGANIZATION_ID
+    post_org_id = bat_buoc(post.get("organization_id"))
 
     # D1 (đa tenant thật, A5): scoped to the post's own organization — before
     # this, any organization's scheduled post would publish through
@@ -743,8 +752,8 @@ async def publish_scheduled_post(post_id: int):
     # globally unique before Phase 1 rebuilt it as UNIQUE(organization_id,
     # platform)). See TECHNICAL_DEBT.md.
     c.execute(
-        "SELECT * FROM accounts WHERE platform = ? AND COALESCE(organization_id, ?) = ?",
-        (post["platform"], DEFAULT_ORGANIZATION_ID, post_org_id)
+        "SELECT * FROM accounts WHERE platform = ? AND organization_id = ?",
+        (post["platform"], post_org_id)
     )
     account_row = c.fetchone()
     
@@ -964,7 +973,7 @@ async def api_run_pipeline(background_tasks: BackgroundTasks, organization_id: s
     below). Busy-checking is per organization (A6) — this only 409s if
     THIS SAME organization already has a run in flight; a different
     organization's concurrent run never blocks it."""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     status = get_pipeline_status(org_id)
     if status.running:
         raise HTTPException(
@@ -983,7 +992,7 @@ async def api_run_pipeline(background_tasks: BackgroundTasks, organization_id: s
 @app.get("/api/pipeline/status")
 async def api_pipeline_status(organization_id: str = Depends(require_org)):
     """Get this organization's pipeline status (A6 — status is per organization now)."""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     return get_pipeline_status(org_id).to_dict()
 
 
@@ -1100,7 +1109,7 @@ async def api_get_signals(limit: int = 20, organization_id: str = Depends(requir
 async def api_get_analytics(organization_id: str = Depends(require_org)):
     """Get this organization's daily analytics summary."""
     from agents.analyst import get_daily_stats, get_weekly_stats
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     return {
         "today": get_daily_stats(organization_id=org_id),
         "week": get_weekly_stats(organization_id=org_id),
@@ -1111,13 +1120,13 @@ async def api_get_analytics(organization_id: str = Depends(require_org)):
 @app.get("/api/accounts")
 async def get_accounts(organization_id: str = Depends(require_org)):
     """Get connected accounts for one organization (without passwords)."""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     conn = get_db()
     c = conn.cursor()
     c.execute(
         """SELECT id, platform, username, is_logged_in, last_login, organization_id
-           FROM accounts WHERE COALESCE(organization_id, ?) = ?""",
-        (DEFAULT_ORGANIZATION_ID, org_id)
+           FROM accounts WHERE organization_id = ?""",
+        (org_id,)
     )
     accounts = [dict(row) for row in c.fetchall()]
     conn.close()
@@ -1136,19 +1145,24 @@ async def add_account(account: AccountCreate, organization_id: str = Depends(req
     composite constraint: the same organization re-adding the same platform
     still replaces its own row; a different organization gets its own row.
     """
-    org_id = account.organization_id or DEFAULT_ORGANIZATION_ID
+    # `account.organization_id` bị bỏ qua có chủ đích — xem ghi chú ở
+    # AccountCreate. Tổ chức chỉ đến từ token đã xác minh.
+    org_id = organization_id
     platform = account.platform.lower()
     conn = get_db()
     c = conn.cursor()
 
     # Encrypt password
     encrypted_pw = encrypt(account.password)
+    page_token_ma_hoa = encrypt(account.page_access_token) if account.page_access_token else None
 
     c.execute(
         """INSERT OR REPLACE INTO accounts
-               (platform, username, password_encrypted, is_logged_in, organization_id)
-           VALUES (?, ?, ?, 0, ?)""",
-        (platform, account.username, encrypted_pw, org_id)
+               (platform, username, password_encrypted, is_logged_in, organization_id,
+                page_id, page_token_encrypted)
+           VALUES (?, ?, ?, 0, ?, ?, ?)""",
+        (platform, account.username, encrypted_pw, org_id,
+         account.page_id, page_token_ma_hoa)
     )
     conn.commit()
     conn.close()
@@ -1158,12 +1172,12 @@ async def add_account(account: AccountCreate, organization_id: str = Depends(req
 @app.post("/api/accounts/{platform}/login")
 async def login_account(platform: str, organization_id: str = Depends(require_org)):
     """Login to a platform using saved credentials, scoped to one organization."""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     conn = get_db()
     c = conn.cursor()
     c.execute(
-        "SELECT * FROM accounts WHERE platform = ? AND COALESCE(organization_id, ?) = ?",
-        (platform.lower(), DEFAULT_ORGANIZATION_ID, org_id)
+        "SELECT * FROM accounts WHERE platform = ? AND organization_id = ?",
+        (platform.lower(), org_id)
     )
     row = c.fetchone()
 
@@ -1181,8 +1195,8 @@ async def login_account(platform: str, organization_id: str = Depends(require_or
 
         if result["success"]:
             c.execute(
-                "UPDATE accounts SET is_logged_in = 1, last_login = ? WHERE platform = ? AND COALESCE(organization_id, ?) = ?",
-                (datetime.now().isoformat(), platform.lower(), DEFAULT_ORGANIZATION_ID, org_id)
+                "UPDATE accounts SET is_logged_in = 1, last_login = ? WHERE platform = ? AND organization_id = ?",
+                (datetime.now().isoformat(), platform.lower(), org_id)
             )
             conn.commit()
 
@@ -1196,12 +1210,12 @@ async def login_account(platform: str, organization_id: str = Depends(require_or
 @app.post("/api/accounts/{platform}/check")
 async def check_login_status(platform: str, organization_id: str = Depends(require_org)):
     """Check if still logged in to a platform, scoped to one organization."""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     conn = get_db()
     c = conn.cursor()
     c.execute(
-        "SELECT id FROM accounts WHERE platform = ? AND COALESCE(organization_id, ?) = ?",
-        (platform.lower(), DEFAULT_ORGANIZATION_ID, org_id)
+        "SELECT id FROM accounts WHERE platform = ? AND organization_id = ?",
+        (platform.lower(), org_id)
     )
     if not c.fetchone():
         conn.close()
@@ -1213,8 +1227,8 @@ async def check_login_status(platform: str, organization_id: str = Depends(requi
         await auto.close()
 
         c.execute(
-            "UPDATE accounts SET is_logged_in = ? WHERE platform = ? AND COALESCE(organization_id, ?) = ?",
-            (1 if is_logged_in else 0, platform.lower(), DEFAULT_ORGANIZATION_ID, org_id)
+            "UPDATE accounts SET is_logged_in = ? WHERE platform = ? AND organization_id = ?",
+            (1 if is_logged_in else 0, platform.lower(), org_id)
         )
         conn.commit()
         conn.close()
@@ -1227,12 +1241,12 @@ async def check_login_status(platform: str, organization_id: str = Depends(requi
 @app.delete("/api/accounts/{platform}")
 async def delete_account(platform: str, organization_id: str = Depends(require_org)):
     """Delete an account and its session, scoped to one organization."""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     conn = get_db()
     c = conn.cursor()
     c.execute(
-        "DELETE FROM accounts WHERE platform = ? AND COALESCE(organization_id, ?) = ?",
-        (platform.lower(), DEFAULT_ORGANIZATION_ID, org_id)
+        "DELETE FROM accounts WHERE platform = ? AND organization_id = ?",
+        (platform.lower(), org_id)
     )
     deleted = c.rowcount > 0
     conn.commit()
@@ -1660,6 +1674,7 @@ async def generate_video(request: VideoRequest, background_tasks: BackgroundTask
         duration = job.raw.get("duration", provider.normalise_duration(request.duration))
         record = video_job_store.create(
             provider.name, job.provider_job_id,
+            organization_id=organization_id,
             prompt=request.prompt, kind="video",
             params={"aspect_ratio": job.raw.get("aspect_ratio"),
                     "duration": duration,
@@ -1698,7 +1713,9 @@ async def check_video_status(task_id: str, organization_id: str = Depends(requir
     link that dies over the weekend. The bytes go into the media library and
     every later reference points at our own copy.
     """
-    record = video_job_store.get(task_id) or video_job_store.get_by_provider_job(task_id)
+    record = (video_job_store.get(task_id, organization_id=organization_id)
+              or video_job_store.get_by_provider_job(task_id,
+                                                     organization_id=organization_id))
     if not record:
         return {"success": False, "error": f"Unknown video job '{task_id}'"}
 
@@ -1718,12 +1735,14 @@ async def check_video_status(task_id: str, organization_id: str = Depends(requir
                 "error": e.reason}
 
     if job.status == JobStatus.FAILED:
-        record = video_job_store.update(task_id, status=JobStatus.FAILED,
+        record = video_job_store.update(task_id, organization_id=organization_id,
+                                        status=JobStatus.FAILED,
                                         error=job.error or "Generation failed")
         return _video_status_response(record)
 
     if job.status != JobStatus.SUCCEEDED:
-        video_job_store.update(task_id, status=JobStatus.RUNNING)
+        video_job_store.update(task_id, organization_id=organization_id,
+                               status=JobStatus.RUNNING)
         return {"success": True, "task_id": task_id, "job_id": task_id,
                 "provider": record["provider"], "status": "processing",
                 "video_url": None}
@@ -1747,12 +1766,14 @@ async def check_video_status(task_id: str, organization_id: str = Depends(requir
         )
     except (ProviderError, MediaRejected) as e:
         reason = getattr(e, "reason", str(e))
-        record = video_job_store.update(task_id, status=JobStatus.FAILED,
+        record = video_job_store.update(task_id, organization_id=organization_id,
+                                        status=JobStatus.FAILED,
                                         error=f"Generated, but could not be stored: {reason}",
                                         video_url=job.video_url)
         return _video_status_response(record)
 
-    record = video_job_store.update(task_id, status=JobStatus.SUCCEEDED,
+    record = video_job_store.update(task_id, organization_id=organization_id,
+                                    status=JobStatus.SUCCEEDED,
                                     asset_id=asset["asset_id"], video_url=asset["url"])
     return _video_status_response(record, asset=asset)
 
@@ -1800,8 +1821,9 @@ def _video_status_response(record: dict, asset: dict = None) -> dict:
 async def list_video_jobs(limit: int = 25, status: Optional[str] = None, organization_id: str = Depends(require_org)):
     """Recent generations — what was made, by whom, and what it cost."""
     return {
-        "jobs": video_job_store.recent(limit=limit, status=status),
-        "spend": video_job_store.spend_summary(),
+        "jobs": video_job_store.recent(limit=limit, status=status,
+                                       organization_id=organization_id),
+        "spend": video_job_store.spend_summary(organization_id=organization_id),
     }
 
 
@@ -1860,6 +1882,7 @@ Quality: High quality, vibrant colors, professional look."""
         duration = job.raw.get("duration", provider.normalise_duration(request.duration))
         record = video_job_store.create(
             provider.name, job.provider_job_id,
+            organization_id=organization_id,
             prompt=enhanced_video_prompt, kind="reel",
             params={"aspect_ratio": "9:16", "duration": duration,
                     "platform": request.platform, "topic": request.topic,
@@ -1965,6 +1988,7 @@ async def generate_avatar(request: AvatarRequest, organization_id: str = Depends
         duration = job.raw.get("duration") or provider.normalise_duration(request.duration)
         record = video_job_store.create(
             provider.name, job.provider_job_id,
+            organization_id=organization_id,
             prompt=request.text or "", kind="avatar",
             params={"aspect_ratio": job.raw.get("aspect_ratio"),
                     "duration": duration,
@@ -2285,12 +2309,12 @@ async def update_config(new_config: ConfigUpdate):
 async def login_extended(platform: str, organization_id: str = Depends(require_org)):
     """Login to extended platforms (Facebook, Reddit, Medium, Substack, HeyGen, beehiiv, etc.),
     scoped to one organization."""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     conn = get_db()
     c = conn.cursor()
     c.execute(
-        "SELECT * FROM accounts WHERE platform = ? AND COALESCE(organization_id, ?) = ?",
-        (platform.lower(), DEFAULT_ORGANIZATION_ID, org_id)
+        "SELECT * FROM accounts WHERE platform = ? AND organization_id = ?",
+        (platform.lower(), org_id)
     )
     row = c.fetchone()
 
@@ -2309,8 +2333,8 @@ async def login_extended(platform: str, organization_id: str = Depends(require_o
 
         if result.get("success"):
             c.execute(
-                "UPDATE accounts SET is_logged_in = 1, last_login = ? WHERE platform = ? AND COALESCE(organization_id, ?) = ?",
-                (datetime.now().isoformat(), platform.lower(), DEFAULT_ORGANIZATION_ID, org_id)
+                "UPDATE accounts SET is_logged_in = 1, last_login = ? WHERE platform = ? AND organization_id = ?",
+                (datetime.now().isoformat(), platform.lower(), org_id)
             )
             conn.commit()
 
@@ -2360,7 +2384,7 @@ async def publish_extended(post_id: int, background_tasks: BackgroundTasks, orga
         conn2 = get_db()
         c2 = conn2.cursor()
         try:
-            post_org_id = post.get("organization_id") or DEFAULT_ORGANIZATION_ID
+            post_org_id = bat_buoc(post.get("organization_id"))
             auto = get_automation_extended(post["platform"], headless=CONFIG["HEADLESS"],
                                             organization_id=post_org_id)
             result = await auto.post(post["content"], gate_media or None)

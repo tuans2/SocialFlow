@@ -12,6 +12,8 @@ Runs: After Creator completes
 """
 
 import os
+
+from to_chuc import bat_buoc
 import re
 import sqlite3
 from datetime import datetime, date
@@ -21,7 +23,6 @@ from typing import Dict, List, Optional, Tuple
 DB_PATH = Path(__file__).parent.parent / "socialflow.db"
 
 # Cung hang so voi migrations.py/main.py/orchestrator.py.
-DEFAULT_ORGANIZATION_ID = os.getenv("SOCIALFLOW_DEFAULT_ORGANIZATION_ID", "default")
 
 # Credential patterns to block
 CREDENTIAL_PATTERNS = [
@@ -119,15 +120,15 @@ def review_post(post: Dict) -> Tuple[str, List[str]]:
 
 async def run(organization_id: Optional[str] = None):
     """Main reviewer run — review this organization's draft posts."""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     print(f"[Reviewer] Starting at {datetime.now().strftime('%H:%M:%S')} for org '{org_id}'")
 
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     drafts = conn.execute(
-        "SELECT * FROM posts WHERE status = 'draft' AND COALESCE(organization_id, ?) = ? "
+        "SELECT * FROM posts WHERE status = 'draft' AND organization_id = ? "
         "ORDER BY created_at ASC",
-        (DEFAULT_ORGANIZATION_ID, org_id)
+        (org_id,)
     ).fetchall()
 
     approved = 0

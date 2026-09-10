@@ -18,10 +18,11 @@ from datetime import datetime, date
 from pathlib import Path
 from typing import List, Dict, Optional
 
+from to_chuc import bat_buoc
+
 DB_PATH = Path(__file__).parent.parent / "socialflow.db"
 
 # Cung hang so voi migrations.py/main.py/orchestrator.py.
-DEFAULT_ORGANIZATION_ID = os.getenv("SOCIALFLOW_DEFAULT_ORGANIZATION_ID", "default")
 
 # Platform content format mapping
 PLATFORM_FORMATS = {
@@ -65,13 +66,13 @@ def init_plans_table():
 
 def get_todays_plan_count(platform: str, organization_id: Optional[str] = None) -> int:
     """How many plans this organization already created for this platform today."""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     conn = sqlite3.connect(str(DB_PATH))
     today = date.today().isoformat()
     count = conn.execute(
         "SELECT COUNT(*) FROM content_plans WHERE platform = ? AND DATE(created_at) = ? "
-        "AND COALESCE(organization_id, ?) = ?",
-        (platform, today, DEFAULT_ORGANIZATION_ID, org_id)
+        "AND organization_id = ?",
+        (platform, today, org_id)
     ).fetchone()[0]
     conn.close()
     return count
@@ -79,13 +80,13 @@ def get_todays_plan_count(platform: str, organization_id: Optional[str] = None) 
 
 def get_todays_post_count(platform: str, organization_id: Optional[str] = None) -> int:
     """How many posts this organization already sent for this platform today."""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     conn = sqlite3.connect(str(DB_PATH))
     today = date.today().isoformat()
     count = conn.execute(
         "SELECT COUNT(*) FROM posts WHERE platform = ? AND status = 'posted' AND DATE(published_at) = ? "
-        "AND COALESCE(organization_id, ?) = ?",
-        (platform, today, DEFAULT_ORGANIZATION_ID, org_id)
+        "AND organization_id = ?",
+        (platform, today, org_id)
     ).fetchone()[0]
     conn.close()
     return count
@@ -95,7 +96,7 @@ def create_plan(signal_id: int, platform: str, content_type: str,
                 priority: int = 5, scheduled_hour: int = None, brief: str = "",
                 organization_id: Optional[str] = None):
     """Create a content plan entry, tagged to the organization that requested it."""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute(
         "INSERT INTO content_plans (signal_id, platform, content_type, priority, scheduled_hour, brief, organization_id) "
@@ -116,7 +117,7 @@ def plan_signal(signal: Dict, organization_id: Optional[str] = None) -> List[Dic
 
     Returns list of plan dicts created.
     """
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     plans = []
     title = signal.get("title", "")
     signal_type = signal.get("signal_type", "news")
@@ -182,7 +183,7 @@ async def run(organization_id: Optional[str] = None):
     """Main planner run — process this organization's unprocessed signals."""
     from agents.scout import get_unprocessed_signals, mark_processed
 
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     init_plans_table()
     print(f"[Planner] Starting at {datetime.now().strftime('%H:%M:%S')} for org '{org_id}'")
 
@@ -209,7 +210,7 @@ async def run(organization_id: Optional[str] = None):
 
 def get_pending_plans(organization_id: Optional[str] = None, limit: int = 20) -> List[Dict]:
     """Get this organization's planned content that hasn't been created yet."""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     rows = conn.execute('''
@@ -220,7 +221,7 @@ def get_pending_plans(organization_id: Optional[str] = None, limit: int = 20) ->
         WHERE cp.status = 'planned' AND COALESCE(cp.organization_id, ?) = ?
         ORDER BY cp.priority DESC, cp.created_at ASC
         LIMIT ?
-    ''', (DEFAULT_ORGANIZATION_ID, org_id, limit)).fetchall()
+    ''', (org_id, limit)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 

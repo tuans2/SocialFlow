@@ -20,12 +20,13 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from pathlib import Path
 
+from to_chuc import bat_buoc
+
 DATABASE_PATH = "socialflow.db"
 
 # Same env var/default as main.py and migrations.py — D1 (đa tenant thật,
 # 2026-09-10). post_metrics is the one table in this module with a real
 # read/write path; every function below filters or tags by organization.
-DEFAULT_ORGANIZATION_ID = os.getenv("SOCIALFLOW_DEFAULT_ORGANIZATION_ID", "default")
 
 
 def init_analytics_tables():
@@ -121,7 +122,7 @@ def record_post_metrics(
     elif impressions > 0:
         eng_rate = round((engagement / impressions) * 100, 2)
 
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
 
     conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
@@ -146,16 +147,16 @@ def record_post_metrics(
 
 def get_platform_performance(platform: str, days: int = 30, organization_id: Optional[str] = None) -> List[dict]:
     """Get recent performance for a platform, scoped to one organization."""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     conn = sqlite3.connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     since = (datetime.now() - timedelta(days=days)).isoformat()
     c.execute("""SELECT * FROM post_metrics
                  WHERE platform = ? AND collected_at > ?
-                   AND COALESCE(organization_id, ?) = ?
+                   AND organization_id = ?
                  ORDER BY engagement_rate DESC""",
-              (platform, since, DEFAULT_ORGANIZATION_ID, org_id))
+              (platform, since, org_id))
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
@@ -163,7 +164,7 @@ def get_platform_performance(platform: str, days: int = 30, organization_id: Opt
 
 def get_top_content_types(days: int = 30, organization_id: Optional[str] = None) -> List[dict]:
     """Which content types perform best, scoped to one organization?"""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     conn = sqlite3.connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
@@ -174,10 +175,10 @@ def get_top_content_types(days: int = 30, organization_id: Optional[str] = None)
                         SUM(engagement) as total_engagement
                  FROM post_metrics
                  WHERE collected_at > ? AND content_type != ''
-                   AND COALESCE(organization_id, ?) = ?
+                   AND organization_id = ?
                  GROUP BY content_type, platform
                  ORDER BY avg_eng_rate DESC""",
-              (since, DEFAULT_ORGANIZATION_ID, org_id))
+              (since, org_id))
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
@@ -185,7 +186,7 @@ def get_top_content_types(days: int = 30, organization_id: Optional[str] = None)
 
 def get_pillar_performance(days: int = 30, organization_id: Optional[str] = None) -> List[dict]:
     """Which content pillars perform best, scoped to one organization?"""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     conn = sqlite3.connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
@@ -196,10 +197,10 @@ def get_pillar_performance(days: int = 30, organization_id: Optional[str] = None
                         SUM(impressions) as total_impressions
                  FROM post_metrics
                  WHERE collected_at > ? AND pillar != ''
-                   AND COALESCE(organization_id, ?) = ?
+                   AND organization_id = ?
                  GROUP BY pillar
                  ORDER BY avg_eng_rate DESC""",
-              (since, DEFAULT_ORGANIZATION_ID, org_id))
+              (since, org_id))
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows

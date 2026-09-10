@@ -21,8 +21,9 @@ from typing import List, Dict, Optional
 
 import httpx
 
+from to_chuc import bat_buoc
+
 # Cung hang so voi migrations.py/main.py/orchestrator.py.
-DEFAULT_ORGANIZATION_ID = os.getenv("SOCIALFLOW_DEFAULT_ORGANIZATION_ID", "default")
 
 # AI relevance keywords
 AI_KEYWORDS = [
@@ -251,7 +252,7 @@ def get_unprocessed_signals(organization_id: Optional[str] = None, limit: int = 
     organization, tracked in signal_org_processed, not a single shared
     `processed` flag on the signal itself (D1, A5).
     """
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
@@ -270,7 +271,7 @@ def mark_processed(signal_ids: List[int], organization_id: Optional[str] = None)
     """
     if not signal_ids:
         return
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     conn = sqlite3.connect(str(DB_PATH))
     conn.executemany(
         "INSERT OR IGNORE INTO signal_org_processed (organization_id, signal_id) VALUES (?, ?)",

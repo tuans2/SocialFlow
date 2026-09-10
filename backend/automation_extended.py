@@ -1290,22 +1290,29 @@ def _get_facebook(headless: bool, organization_id: str = None):
     expire). Playwright stays as the fallback so nothing breaks before the Page
     token is set up.
 
-    KNOWN GAP (D1, not closed by A5): FacebookGraphAutomation reads ONE Page
-    ID/token pair from server-wide env vars (FB_PAGE_ID/FB_PAGE_ACCESS_TOKEN,
-    see facebook_graph.py) — not from the per-organization `accounts` table.
-    Every organization sharing this server currently posts through the SAME
-    configured Facebook Page via the Graph API path; only the Playwright
-    fallback below is organization-scoped. Storing a Page ID/token per
-    organization (e.g. in `accounts`, the way Discord's webhook URL already
-    is) is separate follow-up work, not a column-threading fix — flagged
-    here rather than silently left unscoped.
+    ĐÃ ĐÓNG (Đợt 3 / E6): trước đây FacebookGraphAutomation đọc MỘT cặp Page
+    ID/token từ biến môi trường của máy chủ, nên mọi tổ chức dùng chung máy chủ
+    đều đăng qua cùng một Page — đăng công khai nhầm thương hiệu, không phải
+    chỉ rò dữ liệu đọc. Nay Page lấy theo từng tổ chức từ bảng `accounts`
+    (`facebook_page_store.py`). Tổ chức chưa cấu hình Page thì rơi về
+    Playwright của CHÍNH nó, không mượn Page của tổ chức khác.
     """
     try:
         from facebook_graph import FacebookGraphAutomation
-        graph = FacebookGraphAutomation()
-        if graph.is_configured():
-            print("[Facebook] using Graph API (Page)", flush=True)
-            return graph
+        from facebook_page_store import doc_page_facebook
+
+        thong_tin = doc_page_facebook(organization_id)
+        if thong_tin:
+            page_id, access_token = thong_tin
+            graph = FacebookGraphAutomation(page_id=page_id, access_token=access_token)
+            if graph.is_configured():
+                print("[Facebook] using Graph API (Page) — theo tổ chức", flush=True)
+                return graph
+        else:
+            print(
+                "[Facebook] tổ chức này chưa cấu hình Page riêng; dùng trình duyệt",
+                flush=True,
+            )
     except Exception as e:
         print(f"[Facebook] Graph API unavailable ({e}); falling back to browser", flush=True)
     return FacebookAutomation(headless, organization_id=organization_id)

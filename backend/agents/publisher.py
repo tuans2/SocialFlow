@@ -23,28 +23,29 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from media_utils import validate_publish_media  # noqa: E402
 
+from to_chuc import bat_buoc
+
 DB_PATH = Path(__file__).parent.parent / "socialflow.db"
 
 # Cung hang so voi migrations.py/main.py/orchestrator.py.
-DEFAULT_ORGANIZATION_ID = os.getenv("SOCIALFLOW_DEFAULT_ORGANIZATION_ID", "default")
 
 
 def get_approved_posts(platform: str = None, limit: int = 10, organization_id: Optional[str] = None):
     """Get this organization's approved posts ready for publishing."""
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     if platform:
         rows = conn.execute(
             "SELECT * FROM posts WHERE status = 'approved' AND platform = ? "
-            "AND COALESCE(organization_id, ?) = ? ORDER BY created_at ASC LIMIT ?",
-            (platform, DEFAULT_ORGANIZATION_ID, org_id, limit)
+            "AND organization_id = ? ORDER BY created_at ASC LIMIT ?",
+            (platform, org_id, limit)
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT * FROM posts WHERE status = 'approved' AND COALESCE(organization_id, ?) = ? "
+            "SELECT * FROM posts WHERE status = 'approved' AND organization_id = ? "
             "ORDER BY created_at ASC LIMIT ?",
-            (DEFAULT_ORGANIZATION_ID, org_id, limit)
+            (org_id, limit)
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -86,7 +87,7 @@ async def publish_post(post: Dict, automation_getter) -> bool:
     platform = post["platform"]
     content = post["content"]
     post_id = post["id"]
-    organization_id = post.get("organization_id") or DEFAULT_ORGANIZATION_ID
+    organization_id = bat_buoc(post.get("organization_id"))
 
     # ---- PUBLISH QUALITY GATE (before any browser is started) ----
     gate_ok, gate_error, media = validate_publish_media(
@@ -155,14 +156,14 @@ async def _publish_discord(post: Dict) -> bool:
     import subprocess
     from pathlib import Path
 
-    org_id = post.get("organization_id") or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(post.get("organization_id"))
 
     # Read webhook from DB accounts table, scoped to this post's organization.
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     account = conn.execute(
-        "SELECT * FROM accounts WHERE platform = 'discord' AND COALESCE(organization_id, ?) = ?",
-        (DEFAULT_ORGANIZATION_ID, org_id)
+        "SELECT * FROM accounts WHERE platform = 'discord' AND organization_id = ?",
+        (org_id,)
     ).fetchone()
     conn.close()
 
@@ -214,7 +215,7 @@ async def run(automation_getter=None, organization_id: Optional[str] = None):
         automation_getter: Function(platform, organization_id) -> automation instance
         organization_id: Which organization's approved posts to publish.
     """
-    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    org_id = bat_buoc(organization_id)
     print(f"[Publisher] Starting at {datetime.now().strftime('%H:%M:%S')} for org '{org_id}'")
 
     posts = get_approved_posts(limit=10, organization_id=org_id)

@@ -152,6 +152,38 @@ for tep in sorted(BACKEND.rglob("*.py")):
 check("mọi lời gọi tầng dữ liệu đều truyền organization_id", thieu_org, [])
 
 
+# ── 6. Tham số SQL phải là tuple, không phải một chuỗi trần ────────────────
+# `conn.execute(sql, organization_id)` KHÔNG phải lỗi cú pháp và không phải
+# TypeError — sqlite3 coi chuỗi là một dãy tham số và ném "Incorrect number of
+# bindings" lúc CHẠY, ở đúng nhánh mã đó, có thể là một nhánh hiếm.
+#
+# Lỗi này sinh ra thật trong lượt E7: đổi `(DEFAULT_ORGANIZATION_ID, org_id)`
+# thành `(org_id)` bằng thay-thế-chuỗi làm mất tính tuple ở 8 chỗ. Một lượt vá
+# cơ học luôn sinh ra loại lỗi này; phép thử là thứ bắt được nó.
+TEN_CHUOI = {"organization_id", "org_id", "post_org_id", "platform", "queue_id",
+             "asset_id", "job_id", "sha256", "file_path", "new_state"}
+
+sql_sai = []
+for tep in sorted(BACKEND.rglob("*.py")):
+    if any(x in tep.parts for x in ("venv", "__pycache__")):
+        continue
+    try:
+        cay = ast.parse(tep.read_text(encoding="utf-8"))
+    except SyntaxError:
+        continue
+    for node in ast.walk(cay):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("execute", "executemany")
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Name)
+            and node.args[1].id in TEN_CHUOI
+        ):
+            sql_sai.append(f"{tep.relative_to(BACKEND)}:{node.lineno} {node.args[1].id}")
+check("tham số SQL luôn là tuple, không phải chuỗi trần", sql_sai, [])
+
+
 print("=" * 62)
 for n, g, w in FAIL:
     print(f"FAIL  {n}\n        got={g!r} want={w!r}")

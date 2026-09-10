@@ -36,34 +36,36 @@ def _row(row) -> Optional[dict]:
 
 def create(provider: str, provider_job_id: str, *, prompt: str = "",
            kind: str = "video", params: dict = None,
-           cost_usd: float = None) -> dict:
+           cost_usd: float = None, organization_id: str) -> dict:
     """Record a submitted job and return it. job_id is ours, not the provider's."""
     job_id = f"vid-{uuid.uuid4().hex[:12]}"
     conn = _conn()
     try:
         conn.execute(
             """INSERT INTO video_jobs
-               (job_id, provider, provider_job_id, status, kind, prompt, params, cost_usd)
-               VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)""",
+               (job_id, provider, provider_job_id, status, kind, prompt, params,
+                cost_usd, organization_id)
+               VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)""",
             (job_id, provider, provider_job_id, kind, prompt,
-             json.dumps(params or {}), cost_usd),
+             json.dumps(params or {}), cost_usd, organization_id),
         )
         conn.commit()
     finally:
         conn.close()
-    return get(job_id)
+    return get(job_id, organization_id=organization_id)
 
 
-def get(job_id: str) -> Optional[dict]:
+def get(job_id: str, *, organization_id: str) -> Optional[dict]:
     conn = _conn()
     try:
         return _row(conn.execute(
-            "SELECT * FROM video_jobs WHERE job_id = ?", (job_id,)).fetchone())
+            "SELECT * FROM video_jobs WHERE job_id = ? AND organization_id = ?",
+            (job_id, organization_id)).fetchone())
     finally:
         conn.close()
 
 
-def get_by_provider_job(provider_job_id: str) -> Optional[dict]:
+def get_by_provider_job(provider_job_id: str, *, organization_id: str) -> Optional[dict]:
     """Look up by the provider's own id.
 
     Kept so a task id issued before this table existed, or pasted in by hand,
@@ -72,13 +74,14 @@ def get_by_provider_job(provider_job_id: str) -> Optional[dict]:
     conn = _conn()
     try:
         return _row(conn.execute(
-            "SELECT * FROM video_jobs WHERE provider_job_id = ? ORDER BY id DESC LIMIT 1",
+            "SELECT * FROM video_jobs WHERE provider_job_id = ? AND organization_id = ? "
+            "ORDER BY id DESC LIMIT 1",
             (provider_job_id,)).fetchone())
     finally:
         conn.close()
 
 
-def update(job_id: str, **fields) -> Optional[dict]:
+def update(job_id: str, *, organization_id: str, **fields) -> Optional[dict]:
     allowed = {"status", "asset_id", "video_url", "error", "cost_usd", "params"}
     sets, params = [], []
     for key, value in fields.items():
@@ -92,29 +95,37 @@ def update(job_id: str, **fields) -> Optional[dict]:
     params.append(job_id)
     conn = _conn()
     try:
-        conn.execute(f"UPDATE video_jobs SET {', '.join(sets)} WHERE job_id = ?", params)
+        params.append(organization_id)
+        conn.execute(
+            f"UPDATE video_jobs SET {', '.join(sets)} "
+            "WHERE job_id = ? AND organization_id = ?",
+            params,
+        )
         conn.commit()
     finally:
         conn.close()
     return get(job_id)
 
 
-def recent(limit: int = 25, status: str = None) -> List[dict]:
+def recent(limit: int = 25, status: str = None, *, organization_id: str) -> List[dict]:
     conn = _conn()
     try:
         if status:
             rows = conn.execute(
-                "SELECT * FROM video_jobs WHERE status = ? ORDER BY id DESC LIMIT ?",
-                (status, limit)).fetchall()
+                "SELECT * FROM video_jobs WHERE organization_id = ? AND status = ? "
+                "ORDER BY id DESC LIMIT ?",
+                (organization_id, status, limit)).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM video_jobs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+                "SELECT * FROM video_jobs WHERE organization_id = ? "
+                "ORDER BY id DESC LIMIT ?",
+                (organization_id, limit)).fetchall()
         return [_row(r) for r in rows]
     finally:
         conn.close()
 
 
-def spend_summary() -> dict:
+def spend_summary(*, organization_id: str) -> dict:
     """What video generation actually cost, per provider.
 
     Deliberately summed here and not from assets.cost_usd: when a generation
@@ -129,7 +140,8 @@ def spend_summary() -> dict:
                       COUNT(*) AS jobs,
                       SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END) AS succeeded,
                       ROUND(COALESCE(SUM(cost_usd), 0), 4) AS estimated_usd
-               FROM video_jobs GROUP BY provider"""
+               FROM video_jobs WHERE organization_id = ? GROUP BY provider""",
+            (organization_id,),
         ).fetchall()
         by_provider = [dict(r) for r in rows]
         return {

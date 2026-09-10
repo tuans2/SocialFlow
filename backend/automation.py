@@ -12,12 +12,13 @@ from datetime import datetime
 from typing import Optional, List, Dict
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
+from to_chuc import bat_buoc
+
 # Session storage directory
 SESSIONS_DIR = Path("sessions")
 SESSIONS_DIR.mkdir(exist_ok=True)
 
 # Cung hang so voi migrations.py/main.py/orchestrator.py.
-DEFAULT_ORGANIZATION_ID = os.getenv("SOCIALFLOW_DEFAULT_ORGANIZATION_ID", "default")
 
 class SocialAutomation:
     """Base class for social media automation"""
@@ -27,9 +28,9 @@ class SocialAutomation:
         # D1 (da tenant that, A5): moi to chuc dang nhap MOT tai khoan MangXH
         # rieng cua ho -- phien Playwright (cookie) phai tach theo to chuc,
         # khong the dung chung MOT tep phien cho ca nen tang nhu truoc day
-        # (xem get_session_path). Neu khong dat, coi nhu DEFAULT_ORGANIZATION_ID
+        # (xem get_session_path). Do Dot 3/E7, to chuc la bat buoc — khong
         # de tuong thich nguoc voi cac cho goi cu chua truyen organization_id.
-        self.organization_id = organization_id or DEFAULT_ORGANIZATION_ID
+        self.organization_id = bat_buoc(organization_id)
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
