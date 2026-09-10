@@ -32,6 +32,10 @@ BACKEND_DIR = Path(__file__).resolve().parent
 os.chdir(BACKEND_DIR)                 # sessions/ and .secret_key are relative
 sys.path.insert(0, str(BACKEND_DIR))
 
+# Kept in sync with main.py's DEFAULT_ORGANIZATION_ID (P7 -- FloraOS
+# integration layer). See TECHNICAL_DEBT.md.
+DEFAULT_ORGANIZATION_ID = os.getenv("SOCIALFLOW_DEFAULT_ORGANIZATION_ID", "default")
+
 from automation_extended import get_automation_extended  # noqa: E402
 
 DB_PATH = BACKEND_DIR / "socialflow.db"
@@ -76,15 +80,18 @@ COOKIE_BANNER = ('button[data-cookiebanner="accept_button"], '
                  'button:has-text("Accept All")')
 
 
-def get_account(platform: str):
+def get_account(platform: str, organization_id: str = None):
     """Return (username, password) from the dashboard's accounts table."""
     if not DB_PATH.exists():
         return None, None
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     try:
         conn = sqlite3.connect(str(DB_PATH))
         conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT * FROM accounts WHERE platform = ?",
-                           (platform.lower(),)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM accounts WHERE platform = ? AND COALESCE(organization_id, ?) = ?",
+            (platform.lower(), DEFAULT_ORGANIZATION_ID, org_id)
+        ).fetchone()
         conn.close()
         if not row:
             return None, None
@@ -100,14 +107,16 @@ def get_account(platform: str):
         return None, None
 
 
-def mark_logged_in(platform: str):
+def mark_logged_in(platform: str, organization_id: str = None):
     if not DB_PATH.exists():
         return
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     try:
         conn = sqlite3.connect(str(DB_PATH))
         conn.execute(
-            "UPDATE accounts SET is_logged_in = 1, last_login = ? WHERE platform = ?",
-            (datetime.now().isoformat(), platform.lower())
+            "UPDATE accounts SET is_logged_in = 1, last_login = ? "
+            "WHERE platform = ? AND COALESCE(organization_id, ?) = ?",
+            (datetime.now().isoformat(), platform.lower(), DEFAULT_ORGANIZATION_ID, org_id)
         )
         conn.commit()
         conn.close()
@@ -189,7 +198,7 @@ async def autofill(page, platform: str, username: str, password: str) -> bool:
     return False
 
 
-async def main(platform: str, wait_seconds: int, no_autofill: bool):
+async def main(platform: str, wait_seconds: int, no_autofill: bool, organization_id: str = None):
     platform = platform.lower()
     auto = get_automation_extended(platform, headless=False)
 
@@ -199,7 +208,7 @@ async def main(platform: str, wait_seconds: int, no_autofill: bool):
         print(f"{platform} has no browser login (API-based or webhook platform).")
         return 1
 
-    username, password = (None, None) if no_autofill else get_account(platform)
+    username, password = (None, None) if no_autofill else get_account(platform, organization_id)
 
     await auto.init_browser()
 
@@ -266,7 +275,7 @@ async def main(platform: str, wait_seconds: int, no_autofill: bool):
                     await asyncio.sleep(3)
                     continue
                 await auto.save_session(platform)
-                mark_logged_in(platform)
+                mark_logged_in(platform, organization_id)
                 print(f"OK — session saved to sessions/{platform}_session.json")
                 print(f"   URL: {auto.page.url}")
                 await auto.close()
@@ -293,5 +302,7 @@ if __name__ == "__main__":
     parser.add_argument("--wait", type=int, default=600, help="seconds to wait (default 600)")
     parser.add_argument("--no-autofill", action="store_true",
                         help="do not fill the saved credentials")
+    parser.add_argument("--organization-id", default=None,
+                        help="organization owning this account (default: %s)" % DEFAULT_ORGANIZATION_ID)
     args = parser.parse_args()
-    sys.exit(asyncio.run(main(args.platform, args.wait, args.no_autofill)))
+    sys.exit(asyncio.run(main(args.platform, args.wait, args.no_autofill, args.organization_id)))

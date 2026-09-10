@@ -10,6 +10,7 @@ Responsibilities:
 Runs: 8 AM, 2 PM, 8 PM daily (via orchestrator)
 """
 
+import os
 import re
 import json
 import sqlite3
@@ -19,6 +20,9 @@ from pathlib import Path
 from typing import List, Dict, Optional
 
 import httpx
+
+# Cung hang so voi migrations.py/main.py/orchestrator.py.
+DEFAULT_ORGANIZATION_ID = os.getenv("SOCIALFLOW_DEFAULT_ORGANIZATION_ID", "default")
 
 # AI relevance keywords
 AI_KEYWORDS = [
@@ -209,8 +213,13 @@ async def fetch_github_repos(username: str = "inbharatai") -> List[Dict]:
     return signals
 
 
-async def run():
-    """Main scout run — fetch all signal sources."""
+async def run(organization_id: Optional[str] = None):
+    """Main scout run — fetch all signal sources.
+
+    organization_id is accepted only so the orchestrator can call every agent
+    with the same signature — Scout itself ignores it: `signals` is one
+    shared table, not organization-owned (see migrations.py, D1 A5).
+    """
     init_signals_table()
     print(f"[Scout] Starting at {datetime.now().strftime('%H:%M:%S')}")
 
@@ -225,22 +234,47 @@ async def run():
     return total
 
 
-def get_unprocessed_signals(limit: int = 20) -> List[Dict]:
-    """Get unprocessed signals for the Planner agent."""
+SQL_UNPROCESSED_SIGNALS = """SELECT s.* FROM signals s
+           WHERE NOT EXISTS (
+               SELECT 1 FROM signal_org_processed sop
+               WHERE sop.signal_id = s.id AND sop.organization_id = ?
+           )
+           ORDER BY s.relevance_score DESC, s.score DESC
+           LIMIT ?"""
+
+
+def get_unprocessed_signals(organization_id: Optional[str] = None, limit: int = 20) -> List[Dict]:
+    """Get signals this organization's Planner has not turned into a plan yet.
+
+    `signals` is one shared table (Scout runs once for everybody, not once per
+    organization -- see migrations.py). "Unprocessed" is therefore per
+    organization, tracked in signal_org_processed, not a single shared
+    `processed` flag on the signal itself (D1, A5).
+    """
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
-        "SELECT * FROM signals WHERE processed = 0 ORDER BY relevance_score DESC, score DESC LIMIT ?",
-        (limit,)
+        SQL_UNPROCESSED_SIGNALS,
+        (org_id, limit)
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-def mark_processed(signal_ids: List[int]):
-    """Mark signals as processed by the Planner."""
+def mark_processed(signal_ids: List[int], organization_id: Optional[str] = None):
+    """Mark signals as processed BY THIS ORGANIZATION's Planner.
+
+    Does not touch the shared `signals` row at all -- another organization's
+    Planner must still see the same signal as unprocessed for itself.
+    """
+    if not signal_ids:
+        return
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = sqlite3.connect(str(DB_PATH))
-    placeholders = ",".join("?" * len(signal_ids))
-    conn.execute(f"UPDATE signals SET processed = 1 WHERE id IN ({placeholders})", signal_ids)
+    conn.executemany(
+        "INSERT OR IGNORE INTO signal_org_processed (organization_id, signal_id) VALUES (?, ?)",
+        [(org_id, sid) for sid in signal_ids]
+    )
     conn.commit()
     conn.close()

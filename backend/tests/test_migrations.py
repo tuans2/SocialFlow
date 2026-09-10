@@ -28,15 +28,50 @@ def check(name, got, want):
 scratch = Path(tempfile.mkdtemp(prefix="mig-"))
 db = scratch / "socialflow.db"
 
-# Pre-migration shape: exactly what init_asset_tables() creates.
+# Pre-migration shape: every table any COLUMNS entry targets, built the same
+# way the app itself builds them (each module's own init_*() function against
+# a monkeypatched DB path) — so "adds every declared column" stays a
+# meaningful check instead of silently degrading into partial coverage as
+# COLUMNS grows (D1 Phase 2 added posts/signals/content_plans/content_queue/
+# assets/brand_config on top of Phase 1's accounts/campaigns/templates/
+# post_metrics/weekly_metrics/content_insights).
 import asset_inventory as inv  # noqa: E402
 inv.DATABASE_PATH = str(db)
-inv.init_asset_tables()
+inv.init_asset_tables()  # assets, content_queue, campaigns
+
+import agents.scout as scout_mod  # noqa: E402
+scout_mod.DB_PATH = db
+scout_mod.init_signals_table()  # signals
+
+import agents.planner as planner_mod  # noqa: E402
+planner_mod.DB_PATH = db
+planner_mod.init_plans_table()  # content_plans
+
+import brand_kit  # noqa: E402
+brand_kit.DB_PATH = db
+brand_kit.init_brand_tables()  # brand_config
+
+import analytics_store  # noqa: E402
+analytics_store.DATABASE_PATH = str(db)
+analytics_store.init_analytics_tables()  # post_metrics, weekly_metrics, content_insights
 
 seeded = sqlite3.connect(db)
+# posts, accounts, templates: minimal stand-ins (real shape lives in
+# main.py's init_db(), which is not import-safe here — it wires a full
+# FastAPI app) — same approach this test already used for `posts`.
 seeded.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, content TEXT)")
 seeded.executemany("INSERT INTO posts (content) VALUES (?)",
                    [("one",), ("two",), ("three",)])
+seeded.execute("""CREATE TABLE accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform TEXT NOT NULL UNIQUE,
+    username TEXT NOT NULL,
+    password_encrypted TEXT NOT NULL,
+    is_logged_in INTEGER DEFAULT 0,
+    last_login DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)""")
+seeded.execute("CREATE TABLE templates (id INTEGER PRIMARY KEY, name TEXT)")
 # a row written before the new columns existed
 seeded.execute(
     "INSERT INTO assets (asset_id, asset_type, source, title) VALUES (?,?,?,?)",

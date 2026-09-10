@@ -16,11 +16,20 @@ from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 SESSIONS_DIR = Path("sessions")
 SESSIONS_DIR.mkdir(exist_ok=True)
 
+# Cung hang so voi migrations.py/main.py/orchestrator.py.
+DEFAULT_ORGANIZATION_ID = os.getenv("SOCIALFLOW_DEFAULT_ORGANIZATION_ID", "default")
+
 class SocialAutomation:
     """Base class for social media automation"""
     
-    def __init__(self, headless: bool = False):
+    def __init__(self, headless: bool = False, organization_id: Optional[str] = None):
         self.headless = headless
+        # D1 (da tenant that, A5): moi to chuc dang nhap MOT tai khoan MangXH
+        # rieng cua ho -- phien Playwright (cookie) phai tach theo to chuc,
+        # khong the dung chung MOT tep phien cho ca nen tang nhu truoc day
+        # (xem get_session_path). Neu khong dat, coi nhu DEFAULT_ORGANIZATION_ID
+        # de tuong thich nguoc voi cac cho goi cu chua truyen organization_id.
+        self.organization_id = organization_id or DEFAULT_ORGANIZATION_ID
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
@@ -44,8 +53,18 @@ class SocialAutomation:
             await self.playwright.stop()
     
     def get_session_path(self, platform: str) -> Path:
-        """Get path to session file for a platform"""
-        return SESSIONS_DIR / f"{platform}_session.json"
+        """Get path to THIS ORGANIZATION's session file for a platform.
+
+        Before D1 A5 this was one file per platform, shared by every
+        organization -- organization B logging in to LinkedIn would silently
+        overwrite organization A's saved LinkedIn session, so organization
+        A's next publish could run through organization B's logged-in
+        account. Scoping the filename by organization_id fixes every call
+        site that goes through save_session/load_session (~20 of them across
+        automation.py and automation_extended.py) without needing to touch
+        each one individually.
+        """
+        return SESSIONS_DIR / f"{self.organization_id}_{platform}_session.json"
     
     async def save_session(self, platform: str):
         """Save browser cookies/session"""

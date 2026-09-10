@@ -875,8 +875,9 @@ class SubstackAutomation(SocialAutomation):
     PLATFORM = "substack"
     LOGIN_URL = "https://substack.com/sign-in"
 
-    def __init__(self, headless: bool = False, publication_url: str = None):
-        super().__init__(headless)
+    def __init__(self, headless: bool = False, publication_url: str = None,
+                 organization_id: str = None):
+        super().__init__(headless, organization_id=organization_id)
         self.publication_url = publication_url or ""
 
     async def login(self, email: str, password: str) -> dict:
@@ -1151,8 +1152,9 @@ class EmailAutomation(SocialAutomation):
         },
     }
 
-    def __init__(self, headless: bool = False, email_platform: str = "beehiiv"):
-        super().__init__(headless)
+    def __init__(self, headless: bool = False, email_platform: str = "beehiiv",
+                 organization_id: str = None):
+        super().__init__(headless, organization_id=organization_id)
         self.email_platform = email_platform.lower()
         config = self.PLATFORMS.get(self.email_platform, {})
         self.login_url = config.get("login_url", "")
@@ -1242,24 +1244,34 @@ class EmailAutomation(SocialAutomation):
 
 
 # Extended factory function
-def get_automation_extended(platform: str, headless: bool = False, **kwargs):
-    """Get automation instance for any supported platform"""
+def get_automation_extended(platform: str, headless: bool = False,
+                             organization_id: str = None, **kwargs):
+    """Get automation instance for any supported platform.
+
+    organization_id (D1, A5) scopes the Playwright login session (see
+    automation.py get_session_path) so organizations never share or
+    overwrite each other's logged-in session for a platform. Passed through
+    to every automation that stores a session; ignored by the few that
+    don't need one (Discord webhook, Zalo/TikTok API-based, not part of the
+    six-agent pipeline's platform list).
+    """
     from automation import LinkedInAutomation, InstagramAutomation, TwitterAutomation
 
     platforms = {
-        "linkedin": lambda: LinkedInAutomation(headless),
-        "instagram": lambda: InstagramAutomation(headless),
-        "twitter": lambda: TwitterAutomation(headless),
-        "x": lambda: TwitterAutomation(headless),
-        "facebook": lambda: _get_facebook(headless),
-        "reddit": lambda: RedditAutomation(headless),
-        "medium": lambda: MediumAutomation(headless),
-        "substack": lambda: SubstackAutomation(headless, kwargs.get("publication_url")),
+        "linkedin": lambda: LinkedInAutomation(headless, organization_id=organization_id),
+        "instagram": lambda: InstagramAutomation(headless, organization_id=organization_id),
+        "twitter": lambda: TwitterAutomation(headless, organization_id=organization_id),
+        "x": lambda: TwitterAutomation(headless, organization_id=organization_id),
+        "facebook": lambda: _get_facebook(headless, organization_id=organization_id),
+        "reddit": lambda: RedditAutomation(headless, organization_id=organization_id),
+        "medium": lambda: MediumAutomation(headless, organization_id=organization_id),
+        "substack": lambda: SubstackAutomation(headless, kwargs.get("publication_url"),
+                                                organization_id=organization_id),
         "discord": lambda: DiscordAutomation(kwargs.get("webhook_url")),
-        "heygen": lambda: _get_heygen(headless),
-        "beehiiv": lambda: EmailAutomation(headless, "beehiiv"),
-        "mailerlite": lambda: EmailAutomation(headless, "mailerlite"),
-        "brevo": lambda: EmailAutomation(headless, "brevo"),
+        "heygen": lambda: _get_heygen(headless, organization_id=organization_id),
+        "beehiiv": lambda: EmailAutomation(headless, "beehiiv", organization_id=organization_id),
+        "mailerlite": lambda: EmailAutomation(headless, "mailerlite", organization_id=organization_id),
+        "brevo": lambda: EmailAutomation(headless, "brevo", organization_id=organization_id),
         "zalo": lambda: _get_zalo_oa(),
         "tiktok": lambda: _get_tiktok(headless),
     }
@@ -1271,12 +1283,22 @@ def get_automation_extended(platform: str, headless: bool = False, **kwargs):
     return factory()
 
 
-def _get_facebook(headless: bool):
+def _get_facebook(headless: bool, organization_id: str = None):
     """Graph API when a Page is configured, browser automation otherwise.
 
     The Graph API is the reliable path (one request, no UI, no session to
     expire). Playwright stays as the fallback so nothing breaks before the Page
     token is set up.
+
+    KNOWN GAP (D1, not closed by A5): FacebookGraphAutomation reads ONE Page
+    ID/token pair from server-wide env vars (FB_PAGE_ID/FB_PAGE_ACCESS_TOKEN,
+    see facebook_graph.py) — not from the per-organization `accounts` table.
+    Every organization sharing this server currently posts through the SAME
+    configured Facebook Page via the Graph API path; only the Playwright
+    fallback below is organization-scoped. Storing a Page ID/token per
+    organization (e.g. in `accounts`, the way Discord's webhook URL already
+    is) is separate follow-up work, not a column-threading fix — flagged
+    here rather than silently left unscoped.
     """
     try:
         from facebook_graph import FacebookGraphAutomation
@@ -1286,16 +1308,16 @@ def _get_facebook(headless: bool):
             return graph
     except Exception as e:
         print(f"[Facebook] Graph API unavailable ({e}); falling back to browser", flush=True)
-    return FacebookAutomation(headless)
+    return FacebookAutomation(headless, organization_id=organization_id)
 
 
-def _get_heygen(headless: bool):
+def _get_heygen(headless: bool, organization_id: str = None):
     """Import and return the enhanced HeyGen adapter"""
     try:
         from heygen_adapter import HeyGenVideoAdapter
         return HeyGenVideoAdapter(headless)
     except ImportError:
-        return HeyGenAutomation(headless)
+        return HeyGenAutomation(headless, organization_id=organization_id)
 
 
 def _get_zalo_oa():

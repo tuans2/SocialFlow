@@ -12,6 +12,7 @@ Runs: After Planner completes
 """
 
 import json
+import os
 import re
 import sqlite3
 from datetime import datetime
@@ -19,6 +20,9 @@ from pathlib import Path
 from typing import Dict, Optional
 
 DB_PATH = Path(__file__).parent.parent / "socialflow.db"
+
+# Cung hang so voi migrations.py/main.py/orchestrator.py.
+DEFAULT_ORGANIZATION_ID = os.getenv("SOCIALFLOW_DEFAULT_ORGANIZATION_ID", "default")
 
 # Platform-specific prompt templates
 PLATFORM_PROMPTS = {
@@ -55,18 +59,31 @@ BANNED_PHRASES = [
 ]
 
 
-def get_brand_config() -> Dict:
-    """Load brand config from DB."""
+def get_brand_config(organization_id: Optional[str] = None) -> Dict:
+    """Load this organization's brand config from DB.
+
+    D1 (A5): brand_config is one row PER organization now, not one shared
+    row for everybody (see migrations.py, TECHNICAL_DEBT.md — this was a
+    real cross-organization content leak before: every organization's posts
+    were branded with whichever organization saved their brand kit most
+    recently). An organization that has never saved its own brand kit gets
+    the hardcoded fallback below, not another organization's brand.
+    """
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     try:
-        row = conn.execute("SELECT * FROM brand_config ORDER BY id DESC LIMIT 1").fetchone()
+        row = conn.execute(
+            "SELECT * FROM brand_config WHERE COALESCE(organization_id, ?) = ? ORDER BY id DESC LIMIT 1",
+            (DEFAULT_ORGANIZATION_ID, org_id)
+        ).fetchone()
         if row:
             return dict(row)
     except sqlite3.OperationalError:
         pass
-    conn.close()
-    # Default brand
+    finally:
+        conn.close()
+    # Default brand — used when this organization has not saved its own brand kit.
     return {
         "brand_name": "InBharat AI",
         "primary_color": "#0A74DA",
@@ -77,14 +94,14 @@ def get_brand_config() -> Dict:
     }
 
 
-def build_prompt(plan: Dict) -> str:
-    """Build the AI generation prompt from plan + brand config."""
+def build_prompt(plan: Dict, organization_id: Optional[str] = None) -> str:
+    """Build the AI generation prompt from plan + this organization's brand config."""
     platform = plan["platform"]
     content_type = plan["content_type"]
     title = plan.get("signal_title", "")
     url = plan.get("signal_url", "")
     summary = plan.get("signal_summary", "")
-    brand = get_brand_config()
+    brand = get_brand_config(organization_id)
 
     template = PLATFORM_PROMPTS.get(platform, {}).get(content_type, "")
     if not template:
@@ -116,9 +133,9 @@ def clean_generated_text(text: str) -> str:
     return text.strip()
 
 
-async def generate_post_content(plan: Dict, ai_generate_fn) -> Optional[str]:
+async def generate_post_content(plan: Dict, ai_generate_fn, organization_id: Optional[str] = None) -> Optional[str]:
     """Generate content for a single plan using the configured AI provider."""
-    prompt = build_prompt(plan)
+    prompt = build_prompt(plan, organization_id)
     try:
         raw = await ai_generate_fn(prompt)
         return clean_generated_text(raw)
@@ -128,13 +145,15 @@ async def generate_post_content(plan: Dict, ai_generate_fn) -> Optional[str]:
 
 
 def save_draft(platform: str, content: str, content_type: str,
-               signal_url: str = "", plan_id: int = None):
-    """Save a draft post to the posts table."""
+               signal_url: str = "", plan_id: int = None,
+               organization_id: Optional[str] = None):
+    """Save a draft post to the posts table, tagged to the organization that requested it."""
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute(
-        """INSERT INTO posts (platform, content_type, content, status, created_at)
-           VALUES (?, ?, ?, 'draft', ?)""",
-        (platform, content_type, content, datetime.now().isoformat())
+        """INSERT INTO posts (platform, content_type, content, status, created_at, organization_id)
+           VALUES (?, ?, ?, 'draft', ?, ?)""",
+        (platform, content_type, content, datetime.now().isoformat(), org_id)
     )
     post_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.commit()
@@ -142,24 +161,27 @@ def save_draft(platform: str, content: str, content_type: str,
     return post_id
 
 
-async def run(ai_generate_fn=None):
-    """Main creator run — generate content for pending plans.
+async def run(ai_generate_fn=None, organization_id: Optional[str] = None):
+    """Main creator run — generate content for this organization's pending plans.
 
     Args:
         ai_generate_fn: Async function that takes a prompt string and returns generated text.
                         If None, uses a placeholder.
+        organization_id: Which organization's plans to turn into drafts, and whose
+                          brand config to apply. Defaults to DEFAULT_ORGANIZATION_ID.
     """
     from agents.planner import get_pending_plans, mark_plan_completed
 
-    print(f"[Creator] Starting at {datetime.now().strftime('%H:%M:%S')}")
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    print(f"[Creator] Starting at {datetime.now().strftime('%H:%M:%S')} for org '{org_id}'")
 
-    plans = get_pending_plans(limit=10)
+    plans = get_pending_plans(organization_id=org_id, limit=10)
     print(f"[Creator] {len(plans)} pending plans to process")
 
     created = 0
     for plan in plans:
         if ai_generate_fn:
-            content = await generate_post_content(plan, ai_generate_fn)
+            content = await generate_post_content(plan, ai_generate_fn, organization_id=org_id)
         else:
             # Fallback: use the signal as-is
             content = f"{plan.get('signal_title', '')}\n\n{plan.get('signal_summary', '')}\n\n{plan.get('signal_url', '')}"
@@ -170,7 +192,8 @@ async def run(ai_generate_fn=None):
                 content=content,
                 content_type=plan["content_type"],
                 signal_url=plan.get("signal_url", ""),
-                plan_id=plan["id"]
+                plan_id=plan["id"],
+                organization_id=org_id,
             )
             mark_plan_completed(plan["id"])
             created += 1

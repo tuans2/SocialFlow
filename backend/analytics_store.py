@@ -12,6 +12,7 @@ Even before full platform API connections, this provides:
 Data can be entered manually, via API, or automated later.
 """
 
+import os
 import sqlite3
 import json
 from datetime import datetime, timedelta
@@ -19,6 +20,11 @@ from typing import Optional, List, Dict
 from pathlib import Path
 
 DATABASE_PATH = "socialflow.db"
+
+# Same env var/default as main.py and migrations.py — D1 (đa tenant thật,
+# 2026-09-10). post_metrics is the one table in this module with a real
+# read/write path; every function below filters or tags by organization.
+DEFAULT_ORGANIZATION_ID = os.getenv("SOCIALFLOW_DEFAULT_ORGANIZATION_ID", "default")
 
 
 def init_analytics_tables():
@@ -103,7 +109,8 @@ def record_post_metrics(
     clicks: int = 0,
     video_views: int = 0,
     notes: str = "",
-    source: str = "manual"
+    source: str = "manual",
+    organization_id: Optional[str] = None
 ) -> dict:
     """Record metrics for a single post"""
     # Calculate engagement rate
@@ -113,43 +120,49 @@ def record_post_metrics(
     elif impressions > 0:
         eng_rate = round((engagement / impressions) * 100, 2)
 
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+
     conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
     c.execute('''INSERT INTO post_metrics
         (post_ref, platform, content_type, topic, campaign, pillar,
          published_at, impressions, reach, engagement, likes, comments,
-         shares, saves, clicks, video_views, engagement_rate, notes, source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+         shares, saves, clicks, video_views, engagement_rate, notes, source,
+         organization_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
         (post_ref, platform, content_type, topic, campaign, pillar,
          published_at or datetime.now().isoformat(),
          impressions, reach, engagement, likes, comments,
-         shares, saves, clicks, video_views, eng_rate, notes, source)
+         shares, saves, clicks, video_views, eng_rate, notes, source, org_id)
     )
     conn.commit()
     conn.close()
 
-    return {"post_ref": post_ref, "platform": platform, "engagement_rate": eng_rate}
+    return {"post_ref": post_ref, "platform": platform, "engagement_rate": eng_rate, "organization_id": org_id}
 
 
 # ─── QUERY METRICS ───────────────────────────────────────────
 
-def get_platform_performance(platform: str, days: int = 30) -> List[dict]:
-    """Get recent performance for a platform"""
+def get_platform_performance(platform: str, days: int = 30, organization_id: Optional[str] = None) -> List[dict]:
+    """Get recent performance for a platform, scoped to one organization."""
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = sqlite3.connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     since = (datetime.now() - timedelta(days=days)).isoformat()
     c.execute("""SELECT * FROM post_metrics
                  WHERE platform = ? AND collected_at > ?
+                   AND COALESCE(organization_id, ?) = ?
                  ORDER BY engagement_rate DESC""",
-              (platform, since))
+              (platform, since, DEFAULT_ORGANIZATION_ID, org_id))
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
 
 
-def get_top_content_types(days: int = 30) -> List[dict]:
-    """Which content types perform best?"""
+def get_top_content_types(days: int = 30, organization_id: Optional[str] = None) -> List[dict]:
+    """Which content types perform best, scoped to one organization?"""
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = sqlite3.connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
@@ -160,16 +173,18 @@ def get_top_content_types(days: int = 30) -> List[dict]:
                         SUM(engagement) as total_engagement
                  FROM post_metrics
                  WHERE collected_at > ? AND content_type != ''
+                   AND COALESCE(organization_id, ?) = ?
                  GROUP BY content_type, platform
                  ORDER BY avg_eng_rate DESC""",
-              (since,))
+              (since, DEFAULT_ORGANIZATION_ID, org_id))
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
 
 
-def get_pillar_performance(days: int = 30) -> List[dict]:
-    """Which content pillars perform best?"""
+def get_pillar_performance(days: int = 30, organization_id: Optional[str] = None) -> List[dict]:
+    """Which content pillars perform best, scoped to one organization?"""
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = sqlite3.connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
@@ -180,9 +195,10 @@ def get_pillar_performance(days: int = 30) -> List[dict]:
                         SUM(impressions) as total_impressions
                  FROM post_metrics
                  WHERE collected_at > ? AND pillar != ''
+                   AND COALESCE(organization_id, ?) = ?
                  GROUP BY pillar
                  ORDER BY avg_eng_rate DESC""",
-              (since,))
+              (since, DEFAULT_ORGANIZATION_ID, org_id))
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
@@ -261,6 +277,7 @@ def register_analytics_routes(app):
         clicks: int = 0
         video_views: int = 0
         notes: str = ""
+        organization_id: Optional[str] = None
 
     @router.post("/metrics")
     async def add_metrics(m: MetricsInput):
@@ -268,20 +285,20 @@ def register_analytics_routes(app):
         return {"success": True, "result": result}
 
     @router.get("/platform/{platform}")
-    async def platform_perf(platform: str, days: int = 30):
-        return {"platform": platform, "data": get_platform_performance(platform, days)}
+    async def platform_perf(platform: str, days: int = 30, organization_id: Optional[str] = None):
+        return {"platform": platform, "data": get_platform_performance(platform, days, organization_id)}
 
     @router.get("/top-content-types")
-    async def top_types(days: int = 30):
-        return {"data": get_top_content_types(days)}
+    async def top_types(days: int = 30, organization_id: Optional[str] = None):
+        return {"data": get_top_content_types(days, organization_id)}
 
     @router.get("/pillars")
-    async def pillar_perf(days: int = 30):
-        return {"data": get_pillar_performance(days)}
+    async def pillar_perf(days: int = 30, organization_id: Optional[str] = None):
+        return {"data": get_pillar_performance(days, organization_id)}
 
     @router.get("/weekly-summary")
-    async def weekly(week_start: str = None):
-        return generate_weekly_summary(week_start)
+    async def weekly(week_start: str = None, organization_id: Optional[str] = None):
+        return generate_weekly_summary(week_start, organization_id)
 
     app.include_router(router)
 

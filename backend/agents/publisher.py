@@ -12,6 +12,8 @@ Runs: At posting windows (11 AM, 11 PM) or on-demand
 """
 
 import json
+import os
+import time
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -23,20 +25,26 @@ from media_utils import validate_publish_media  # noqa: E402
 
 DB_PATH = Path(__file__).parent.parent / "socialflow.db"
 
+# Cung hang so voi migrations.py/main.py/orchestrator.py.
+DEFAULT_ORGANIZATION_ID = os.getenv("SOCIALFLOW_DEFAULT_ORGANIZATION_ID", "default")
 
-def get_approved_posts(platform: str = None, limit: int = 10):
-    """Get approved posts ready for publishing."""
+
+def get_approved_posts(platform: str = None, limit: int = 10, organization_id: Optional[str] = None):
+    """Get this organization's approved posts ready for publishing."""
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     if platform:
         rows = conn.execute(
-            "SELECT * FROM posts WHERE status = 'approved' AND platform = ? ORDER BY created_at ASC LIMIT ?",
-            (platform, limit)
+            "SELECT * FROM posts WHERE status = 'approved' AND platform = ? "
+            "AND COALESCE(organization_id, ?) = ? ORDER BY created_at ASC LIMIT ?",
+            (platform, DEFAULT_ORGANIZATION_ID, org_id, limit)
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT * FROM posts WHERE status = 'approved' ORDER BY created_at ASC LIMIT ?",
-            (limit,)
+            "SELECT * FROM posts WHERE status = 'approved' AND COALESCE(organization_id, ?) = ? "
+            "ORDER BY created_at ASC LIMIT ?",
+            (DEFAULT_ORGANIZATION_ID, org_id, limit)
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -68,12 +76,17 @@ async def publish_post(post: Dict, automation_getter) -> bool:
     """Publish a single post using the appropriate automation.
 
     Args:
-        post: Post dict from DB
-        automation_getter: Function that returns the platform automation instance
+        post: Post dict from DB — carries its own organization_id (D1, A5),
+              which is passed to automation_getter so login sessions
+              (automation.py) resolve to the RIGHT organization's browser
+              session, not whichever organization logged in most recently.
+        automation_getter: Function(platform, organization_id) that returns
+              the platform automation instance.
     """
     platform = post["platform"]
     content = post["content"]
     post_id = post["id"]
+    organization_id = post.get("organization_id") or DEFAULT_ORGANIZATION_ID
 
     # ---- PUBLISH QUALITY GATE (before any browser is started) ----
     gate_ok, gate_error, media = validate_publish_media(
@@ -87,7 +100,7 @@ async def publish_post(post: Dict, automation_getter) -> bool:
     print(f"[Publisher] Publishing #{post_id} to {platform} ({len(content)} chars)")
 
     try:
-        automation = automation_getter(platform)
+        automation = automation_getter(platform, organization_id)
         if automation is None:
             # Discord uses webhook — handle separately
             if platform == "discord":
@@ -132,15 +145,24 @@ async def publish_post(post: Dict, automation_getter) -> bool:
 
 
 async def _publish_discord(post: Dict) -> bool:
-    """Publish to Discord via webhook."""
+    """Publish to Discord via webhook, using THIS post's organization's webhook.
+
+    Before D1 A5 this looked up `accounts WHERE platform = 'discord'` with no
+    organization filter at all — any organization's post would publish
+    through whichever organization's Discord webhook happened to be in that
+    row (A1 finding 2).
+    """
     import subprocess
     from pathlib import Path
 
-    # Read webhook from DB accounts table
+    org_id = post.get("organization_id") or DEFAULT_ORGANIZATION_ID
+
+    # Read webhook from DB accounts table, scoped to this post's organization.
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     account = conn.execute(
-        "SELECT * FROM accounts WHERE platform = 'discord'"
+        "SELECT * FROM accounts WHERE platform = 'discord' AND COALESCE(organization_id, ?) = ?",
+        (DEFAULT_ORGANIZATION_ID, org_id)
     ).fetchone()
     conn.close()
 
@@ -185,26 +207,37 @@ async def _publish_discord(post: Dict) -> bool:
         return False
 
 
-async def run(automation_getter=None):
-    """Main publisher run — publish all approved posts.
+async def run(automation_getter=None, organization_id: Optional[str] = None):
+    """Main publisher run — publish this organization's approved posts.
 
     Args:
-        automation_getter: Function(platform) -> automation instance
+        automation_getter: Function(platform, organization_id) -> automation instance
+        organization_id: Which organization's approved posts to publish.
     """
-    print(f"[Publisher] Starting at {datetime.now().strftime('%H:%M:%S')}")
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    print(f"[Publisher] Starting at {datetime.now().strftime('%H:%M:%S')} for org '{org_id}'")
 
-    posts = get_approved_posts(limit=10)
+    posts = get_approved_posts(limit=10, organization_id=org_id)
     print(f"[Publisher] {len(posts)} approved posts to publish")
 
     posted = 0
     failed = 0
+    # Đo thời gian thật mỗi nền tảng (A2b, Unified Shell §7) — số đo này
+    # quyết định giới hạn song song ở A2, không phải một cron chung xử lý
+    # tuần tự từng tổ chức, và không phải đoán.
+    platform_seconds: Dict[str, float] = {}
 
     for post in posts:
+        platform = post.get("platform", "unknown")
+        started = time.monotonic()
         success = await publish_post(post, automation_getter)
+        elapsed = time.monotonic() - started
+        platform_seconds[platform] = platform_seconds.get(platform, 0.0) + elapsed
+        print(f"[Publisher] {platform} took {elapsed:.1f}s (post #{post.get('id')})")
         if success:
             posted += 1
         else:
             failed += 1
 
     print(f"[Publisher] Done — posted: {posted}, failed: {failed}")
-    return {"posted": posted, "failed": failed}
+    return {"posted": posted, "failed": failed, "platform_seconds": platform_seconds}

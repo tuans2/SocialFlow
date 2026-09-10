@@ -35,7 +35,11 @@ from migrations import run_migrations
 from analytics_store import init_analytics_tables, register_analytics_routes
 from visual_content_routes import router as visual_router
 from brand_kit import router as brand_router, init_brand_tables
-from agents.orchestrator import run_full_pipeline, run_publish_only, run_scout_only, run_analyst_only, status as pipeline_status
+from agents.orchestrator import (
+    run_full_pipeline, run_publish_only, run_scout_only, run_analyst_only,
+    run_scheduled_cycle, run_for_organizations, list_known_organizations,
+    get_status as get_pipeline_status,
+)
 from agents.scout import init_signals_table
 from agents.planner import init_plans_table
 
@@ -58,6 +62,17 @@ from media_utils import (
 )
 SESSIONS_DIR = Path("sessions")
 SESSIONS_DIR.mkdir(exist_ok=True)
+
+# Organization scoping for connected platform accounts (P7 -- FloraOS
+# integration layer). SocialFlow has no caller-identity/auth mechanism of its
+# own yet (D1 in floraos-core's PRD is still open: whether SocialFlow becomes
+# fully multi-tenant), so this is deliberately a placeholder rather than a
+# real security boundary: every accounts.* endpoint now requires an
+# organization_id (defaulting to this constant when the caller omits it,
+# which preserves today's single-operator behaviour), but nothing yet
+# verifies that the caller is entitled to the organization it names. See
+# TECHNICAL_DEBT.md.
+DEFAULT_ORGANIZATION_ID = os.getenv("SOCIALFLOW_DEFAULT_ORGANIZATION_ID", "default")
 
 # Encryption for credentials
 def get_or_create_key():
@@ -154,6 +169,7 @@ class AccountCreate(BaseModel):
     platform: str
     username: str
     password: str
+    organization_id: Optional[str] = None
 
 class ContentRequest(BaseModel):
     topic: str
@@ -707,8 +723,18 @@ async def publish_scheduled_post(post_id: int):
     
     c.execute("SELECT * FROM posts WHERE id = ?", (post_id,))
     post = dict(c.fetchone())
-    
-    c.execute("SELECT * FROM accounts WHERE platform = ?", (post["platform"],))
+    post_org_id = post.get("organization_id") or DEFAULT_ORGANIZATION_ID
+
+    # D1 (đa tenant thật, A5): scoped to the post's own organization — before
+    # this, any organization's scheduled post would publish through
+    # whichever organization's account happened to match the platform name
+    # (only safe by accident, because `accounts.platform` used to be
+    # globally unique before Phase 1 rebuilt it as UNIQUE(organization_id,
+    # platform)). See TECHNICAL_DEBT.md.
+    c.execute(
+        "SELECT * FROM accounts WHERE platform = ? AND COALESCE(organization_id, ?) = ?",
+        (post["platform"], DEFAULT_ORGANIZATION_ID, post_org_id)
+    )
     account_row = c.fetchone()
     
     if not account_row:
@@ -734,8 +760,9 @@ async def publish_scheduled_post(post_id: int):
         return
 
     try:
-        # Get automation instance
-        auto = get_automation_extended(post["platform"], headless=CONFIG["HEADLESS"])
+        # Get automation instance, scoped to this post's organization
+        auto = get_automation_extended(post["platform"], headless=CONFIG["HEADLESS"],
+                                        organization_id=post_org_id)
 
         # Post content (media_paths already resolved to absolute, existing files)
         result = await auto.post(post["content"], media_paths or None)
@@ -766,6 +793,17 @@ async def lifespan(app: FastAPI):
     init_brand_tables()
     init_signals_table()
     init_plans_table()
+    # D1 (đa tenant thật, A5) — run_migrations() ALSO runs once at module
+    # import time (below, right after init_asset_tables()), but posts/
+    # accounts/templates/signals/content_plans/brand_config only exist from
+    # THIS point on — they are created above, inside lifespan(), which fires
+    # after import. On a genuinely fresh database, the module-level call
+    # would find none of those tables yet and silently skip every column it
+    # was supposed to add to them (reported in "skipped", never retried).
+    # migrations.py's own rules say every migration is idempotent and safe
+    # to run more than once, so calling it again here — now that every
+    # table actually exists — is the fix, not a workaround.
+    run_migrations()
     scheduler.start()
 
     # ── Schedule autonomous pipeline jobs ──
@@ -837,18 +875,30 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown()
 
 
-# ── Scheduler job wrappers ──
+# ── Scheduler job wrappers (A6) ──
+# Real multi-organization execution: every job below loops over
+# list_known_organizations() (the distinct organization_ids in `accounts` —
+# SocialFlow has no organizations table of its own) in bounded-parallel
+# batches (run_for_organizations / run_scheduled_cycle, A2's design actually
+# wired up), not just DEFAULT_ORGANIZATION_ID as before A6. A single-org
+# install (only one organization_id ever appears in `accounts`, or none yet)
+# behaves exactly as before — the loop just has one organization in it.
 async def _run_pipeline_job(skip_publish=True):
-    await run_full_pipeline(ai_generate_fn=generate_content_ai, skip_publish=skip_publish)
+    await run_scheduled_cycle(ai_generate_fn=generate_content_ai, skip_publish=skip_publish)
 
 async def _run_scout_job():
+    # Scout is shared across every organization (D1 A5) — runs once, not once
+    # per organization.
     await run_scout_only()
 
 async def _run_publish_job():
-    await run_publish_only()
+    await run_for_organizations(
+        run_publish_only,
+        automation_getter=lambda p, org: get_automation_extended(p, organization_id=org),
+    )
 
 async def _run_analyst_job():
-    await run_analyst_only()
+    await run_for_organizations(run_analyst_only)
 
 app = FastAPI(title="SocialFlow", lifespan=lifespan)
 
@@ -896,22 +946,34 @@ async def health_check():
 # ============== PIPELINE API ==============
 
 @app.post("/api/pipeline/run")
-async def api_run_pipeline(background_tasks: BackgroundTasks):
-    """Run the full autonomous pipeline in background."""
-    if pipeline_status.running:
-        raise HTTPException(status_code=409, detail="Pipeline already running")
+async def api_run_pipeline(background_tasks: BackgroundTasks, organization_id: Optional[str] = None):
+    """Run the full autonomous pipeline in background, for ONE organization
+    (the dashboard button / manual on-demand run — the automatic schedule
+    goes through run_scheduled_cycle() instead, see the scheduler jobs
+    below). Busy-checking is per organization (A6) — this only 409s if
+    THIS SAME organization already has a run in flight; a different
+    organization's concurrent run never blocks it."""
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    status = get_pipeline_status(org_id)
+    if status.running:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Pipeline dang chay cho to chuc '{org_id}'. Vui long thu lai sau.",
+        )
     background_tasks.add_task(
         run_full_pipeline,
         ai_generate_fn=generate_content_ai,
-        skip_publish=True  # Don't auto-publish — let user review in queue
+        skip_publish=True,  # Don't auto-publish — let user review in queue
+        organization_id=org_id,
     )
-    return {"status": "started", "message": "Pipeline running in background"}
+    return {"status": "started", "message": "Pipeline running in background", "organization_id": org_id}
 
 
 @app.get("/api/pipeline/status")
-async def api_pipeline_status():
-    """Get current pipeline status."""
-    return pipeline_status.to_dict()
+async def api_pipeline_status(organization_id: Optional[str] = None):
+    """Get this organization's pipeline status (A6 — status is per organization now)."""
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    return get_pipeline_status(org_id).to_dict()
 
 
 @app.get("/api/pipeline/queue")
@@ -985,7 +1047,7 @@ async def api_publish_post(post_id: int, background_tasks: BackgroundTasks):
 async def _publish_single_post(post: dict):
     """Publish a single post (background task)."""
     from agents.publisher import publish_post
-    await publish_post(post, automation_getter=lambda p: get_automation_extended(p))
+    await publish_post(post, automation_getter=lambda p, org: get_automation_extended(p, organization_id=org))
 
 
 @app.get("/api/pipeline/signals")
@@ -1002,112 +1064,155 @@ async def api_get_signals(limit: int = 20):
 
 
 @app.get("/api/pipeline/analytics")
-async def api_get_analytics():
-    """Get daily analytics summary."""
+async def api_get_analytics(organization_id: Optional[str] = None):
+    """Get this organization's daily analytics summary."""
     from agents.analyst import get_daily_stats, get_weekly_stats
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     return {
-        "today": get_daily_stats(),
-        "week": get_weekly_stats(),
+        "today": get_daily_stats(organization_id=org_id),
+        "week": get_weekly_stats(organization_id=org_id),
     }
 
 
 # --- Accounts ---
 @app.get("/api/accounts")
-async def get_accounts():
-    """Get all connected accounts (without passwords)"""
+async def get_accounts(organization_id: Optional[str] = None):
+    """Get connected accounts for one organization (without passwords)."""
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT id, platform, username, is_logged_in, last_login FROM accounts")
+    c.execute(
+        """SELECT id, platform, username, is_logged_in, last_login, organization_id
+           FROM accounts WHERE COALESCE(organization_id, ?) = ?""",
+        (DEFAULT_ORGANIZATION_ID, org_id)
+    )
     accounts = [dict(row) for row in c.fetchall()]
     conn.close()
     return {"accounts": accounts}
 
 @app.post("/api/accounts")
 async def add_account(account: AccountCreate):
-    """Add account credentials"""
+    """Add account credentials for one organization.
+
+    D1 (đa tenant thật, 2026-09-10): `accounts` was rebuilt with
+    UNIQUE(organization_id, platform) (migrations.py), replacing the old
+    global UNIQUE(platform). Two different organizations can each hold their
+    own credentials for the same platform now — that used to be refused with
+    409 only because the old constraint made it impossible to store safely,
+    not because it was undesirable. INSERT OR REPLACE keys off the new
+    composite constraint: the same organization re-adding the same platform
+    still replaces its own row; a different organization gets its own row.
+    """
+    org_id = account.organization_id or DEFAULT_ORGANIZATION_ID
+    platform = account.platform.lower()
     conn = get_db()
     c = conn.cursor()
-    
+
     # Encrypt password
     encrypted_pw = encrypt(account.password)
-    
+
     c.execute(
-        """INSERT OR REPLACE INTO accounts (platform, username, password_encrypted, is_logged_in)
-           VALUES (?, ?, ?, 0)""",
-        (account.platform.lower(), account.username, encrypted_pw)
+        """INSERT OR REPLACE INTO accounts
+               (platform, username, password_encrypted, is_logged_in, organization_id)
+           VALUES (?, ?, ?, 0, ?)""",
+        (platform, account.username, encrypted_pw, org_id)
     )
     conn.commit()
     conn.close()
-    
+
     return {"success": True, "message": f"Account added for {account.platform}"}
 
 @app.post("/api/accounts/{platform}/login")
-async def login_account(platform: str):
-    """Login to a platform using saved credentials"""
+async def login_account(platform: str, organization_id: Optional[str] = None):
+    """Login to a platform using saved credentials, scoped to one organization."""
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM accounts WHERE platform = ?", (platform.lower(),))
+    c.execute(
+        "SELECT * FROM accounts WHERE platform = ? AND COALESCE(organization_id, ?) = ?",
+        (platform.lower(), DEFAULT_ORGANIZATION_ID, org_id)
+    )
     row = c.fetchone()
-    
+
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="Account not found")
-    
+
     account = dict(row)
     password = decrypt(account["password_encrypted"])
-    
+
     try:
-        auto = get_automation_extended(platform, headless=False)  # Always visible for login
+        auto = get_automation_extended(platform, headless=False, organization_id=org_id)  # Always visible for login
         result = await auto.login(account["username"], password)
         await auto.close()
-        
+
         if result["success"]:
             c.execute(
-                "UPDATE accounts SET is_logged_in = 1, last_login = ? WHERE platform = ?",
-                (datetime.now().isoformat(), platform.lower())
+                "UPDATE accounts SET is_logged_in = 1, last_login = ? WHERE platform = ? AND COALESCE(organization_id, ?) = ?",
+                (datetime.now().isoformat(), platform.lower(), DEFAULT_ORGANIZATION_ID, org_id)
             )
             conn.commit()
-        
+
         conn.close()
         return result
-        
+
     except Exception as e:
         conn.close()
         return {"success": False, "message": str(e)}
 
 @app.post("/api/accounts/{platform}/check")
-async def check_login_status(platform: str):
-    """Check if still logged in to a platform"""
+async def check_login_status(platform: str, organization_id: Optional[str] = None):
+    """Check if still logged in to a platform, scoped to one organization."""
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT id FROM accounts WHERE platform = ? AND COALESCE(organization_id, ?) = ?",
+        (platform.lower(), DEFAULT_ORGANIZATION_ID, org_id)
+    )
+    if not c.fetchone():
+        conn.close()
+        return {"logged_in": False, "error": "Account not found"}
+
     try:
-        auto = get_automation_extended(platform, headless=True)
+        auto = get_automation_extended(platform, headless=True, organization_id=org_id)
         is_logged_in = await auto.check_login()
         await auto.close()
-        
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("UPDATE accounts SET is_logged_in = ? WHERE platform = ?",
-                  (1 if is_logged_in else 0, platform.lower()))
+
+        c.execute(
+            "UPDATE accounts SET is_logged_in = ? WHERE platform = ? AND COALESCE(organization_id, ?) = ?",
+            (1 if is_logged_in else 0, platform.lower(), DEFAULT_ORGANIZATION_ID, org_id)
+        )
         conn.commit()
         conn.close()
-        
+
         return {"logged_in": is_logged_in}
     except Exception as e:
+        conn.close()
         return {"logged_in": False, "error": str(e)}
 
 @app.delete("/api/accounts/{platform}")
-async def delete_account(platform: str):
-    """Delete account and session"""
+async def delete_account(platform: str, organization_id: Optional[str] = None):
+    """Delete an account and its session, scoped to one organization."""
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = get_db()
     c = conn.cursor()
-    c.execute("DELETE FROM accounts WHERE platform = ?", (platform.lower(),))
+    c.execute(
+        "DELETE FROM accounts WHERE platform = ? AND COALESCE(organization_id, ?) = ?",
+        (platform.lower(), DEFAULT_ORGANIZATION_ID, org_id)
+    )
+    deleted = c.rowcount > 0
     conn.commit()
     conn.close()
-    
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Account not found")
+
     # Delete session file
     session_file = SESSIONS_DIR / f"{platform.lower()}_session.json"
     if session_file.exists():
         session_file.unlink()
-    
+
     return {"deleted": True}
 
 # --- Content Generation ---
@@ -2114,11 +2219,16 @@ async def update_config(new_config: ConfigUpdate):
 
 # --- Extended Platform Login/Post (Facebook, Reddit, Medium, Substack, Discord, HeyGen, Email) ---
 @app.post("/api/accounts/{platform}/login-extended")
-async def login_extended(platform: str):
-    """Login to extended platforms (Facebook, Reddit, Medium, Substack, HeyGen, beehiiv, etc.)"""
+async def login_extended(platform: str, organization_id: Optional[str] = None):
+    """Login to extended platforms (Facebook, Reddit, Medium, Substack, HeyGen, beehiiv, etc.),
+    scoped to one organization."""
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM accounts WHERE platform = ?", (platform.lower(),))
+    c.execute(
+        "SELECT * FROM accounts WHERE platform = ? AND COALESCE(organization_id, ?) = ?",
+        (platform.lower(), DEFAULT_ORGANIZATION_ID, org_id)
+    )
     row = c.fetchone()
 
     if not row:
@@ -2129,15 +2239,15 @@ async def login_extended(platform: str):
     password = decrypt(account["password_encrypted"])
 
     try:
-        auto = get_automation_extended(platform, headless=False)
+        auto = get_automation_extended(platform, headless=False, organization_id=org_id)
         result = await auto.login(account["username"], password)
         if hasattr(auto, 'close'):
             await auto.close()
 
         if result.get("success"):
             c.execute(
-                "UPDATE accounts SET is_logged_in = 1, last_login = ? WHERE platform = ?",
-                (datetime.now().isoformat(), platform.lower())
+                "UPDATE accounts SET is_logged_in = 1, last_login = ? WHERE platform = ? AND COALESCE(organization_id, ?) = ?",
+                (datetime.now().isoformat(), platform.lower(), DEFAULT_ORGANIZATION_ID, org_id)
             )
             conn.commit()
 
@@ -2184,7 +2294,9 @@ async def publish_extended(post_id: int, background_tasks: BackgroundTasks):
         conn2 = get_db()
         c2 = conn2.cursor()
         try:
-            auto = get_automation_extended(post["platform"], headless=CONFIG["HEADLESS"])
+            post_org_id = post.get("organization_id") or DEFAULT_ORGANIZATION_ID
+            auto = get_automation_extended(post["platform"], headless=CONFIG["HEADLESS"],
+                                            organization_id=post_org_id)
             result = await auto.post(post["content"], gate_media or None)
             if hasattr(auto, 'close'):
                 await auto.close()

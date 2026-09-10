@@ -11,13 +11,17 @@ Responsibilities:
 Runs: After Creator completes
 """
 
+import os
 import re
 import sqlite3
 from datetime import datetime, date
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 DB_PATH = Path(__file__).parent.parent / "socialflow.db"
+
+# Cung hang so voi migrations.py/main.py/orchestrator.py.
+DEFAULT_ORGANIZATION_ID = os.getenv("SOCIALFLOW_DEFAULT_ORGANIZATION_ID", "default")
 
 # Credential patterns to block
 CREDENTIAL_PATTERNS = [
@@ -113,14 +117,17 @@ def review_post(post: Dict) -> Tuple[str, List[str]]:
         return "approved", issues  # Minor issues → auto-approve with warnings
 
 
-async def run():
-    """Main reviewer run — review all draft posts."""
-    print(f"[Reviewer] Starting at {datetime.now().strftime('%H:%M:%S')}")
+async def run(organization_id: Optional[str] = None):
+    """Main reviewer run — review this organization's draft posts."""
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
+    print(f"[Reviewer] Starting at {datetime.now().strftime('%H:%M:%S')} for org '{org_id}'")
 
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     drafts = conn.execute(
-        "SELECT * FROM posts WHERE status = 'draft' ORDER BY created_at ASC"
+        "SELECT * FROM posts WHERE status = 'draft' AND COALESCE(organization_id, ?) = ? "
+        "ORDER BY created_at ASC",
+        (DEFAULT_ORGANIZATION_ID, org_id)
     ).fetchall()
 
     approved = 0

@@ -12,12 +12,16 @@ Runs: After Scout completes
 """
 
 import json
+import os
 import sqlite3
 from datetime import datetime, date
 from pathlib import Path
 from typing import List, Dict, Optional
 
 DB_PATH = Path(__file__).parent.parent / "socialflow.db"
+
+# Cung hang so voi migrations.py/main.py/orchestrator.py.
+DEFAULT_ORGANIZATION_ID = os.getenv("SOCIALFLOW_DEFAULT_ORGANIZATION_ID", "default")
 
 # Platform content format mapping
 PLATFORM_FORMATS = {
@@ -59,47 +63,60 @@ def init_plans_table():
     conn.close()
 
 
-def get_todays_plan_count(platform: str) -> int:
-    """How many plans already created for this platform today."""
+def get_todays_plan_count(platform: str, organization_id: Optional[str] = None) -> int:
+    """How many plans this organization already created for this platform today."""
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = sqlite3.connect(str(DB_PATH))
     today = date.today().isoformat()
     count = conn.execute(
-        "SELECT COUNT(*) FROM content_plans WHERE platform = ? AND DATE(created_at) = ?",
-        (platform, today)
+        "SELECT COUNT(*) FROM content_plans WHERE platform = ? AND DATE(created_at) = ? "
+        "AND COALESCE(organization_id, ?) = ?",
+        (platform, today, DEFAULT_ORGANIZATION_ID, org_id)
     ).fetchone()[0]
     conn.close()
     return count
 
 
-def get_todays_post_count(platform: str) -> int:
-    """How many posts already sent for this platform today."""
+def get_todays_post_count(platform: str, organization_id: Optional[str] = None) -> int:
+    """How many posts this organization already sent for this platform today."""
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = sqlite3.connect(str(DB_PATH))
     today = date.today().isoformat()
     count = conn.execute(
-        "SELECT COUNT(*) FROM posts WHERE platform = ? AND status = 'posted' AND DATE(published_at) = ?",
-        (platform, today)
+        "SELECT COUNT(*) FROM posts WHERE platform = ? AND status = 'posted' AND DATE(published_at) = ? "
+        "AND COALESCE(organization_id, ?) = ?",
+        (platform, today, DEFAULT_ORGANIZATION_ID, org_id)
     ).fetchone()[0]
     conn.close()
     return count
 
 
 def create_plan(signal_id: int, platform: str, content_type: str,
-                priority: int = 5, scheduled_hour: int = None, brief: str = ""):
-    """Create a content plan entry."""
+                priority: int = 5, scheduled_hour: int = None, brief: str = "",
+                organization_id: Optional[str] = None):
+    """Create a content plan entry, tagged to the organization that requested it."""
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute(
-        "INSERT INTO content_plans (signal_id, platform, content_type, priority, scheduled_hour, brief) VALUES (?, ?, ?, ?, ?, ?)",
-        (signal_id, platform, content_type, priority, scheduled_hour, brief)
+        "INSERT INTO content_plans (signal_id, platform, content_type, priority, scheduled_hour, brief, organization_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (signal_id, platform, content_type, priority, scheduled_hour, brief, org_id)
     )
     conn.commit()
     conn.close()
 
 
-def plan_signal(signal: Dict) -> List[Dict]:
-    """Decide what to do with a signal — which platforms and formats.
+def plan_signal(signal: Dict, organization_id: Optional[str] = None) -> List[Dict]:
+    """Decide what to do with a signal — which platforms and formats, for ONE organization.
+
+    `signal` itself is shared (see migrations.py) but every cap check and
+    every plan created here is scoped to `organization_id` — two
+    organizations independently deciding what to do with the same shared
+    signal must not see or affect each other's daily caps.
 
     Returns list of plan dicts created.
     """
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     plans = []
     title = signal.get("title", "")
     signal_type = signal.get("signal_type", "news")
@@ -111,7 +128,8 @@ def plan_signal(signal: Dict) -> List[Dict]:
         for platform, hour in [("discord", None), ("linkedin", 11), ("x", None)]:
             limits = DEFAULT_LIMITS.get(platform, {})
             cap = limits.get("daily_cap", 5)
-            current = get_todays_plan_count(platform) + get_todays_post_count(platform)
+            current = (get_todays_plan_count(platform, org_id)
+                       + get_todays_post_count(platform, org_id))
             if current < cap:
                 create_plan(
                     signal_id=signal["id"],
@@ -119,20 +137,23 @@ def plan_signal(signal: Dict) -> List[Dict]:
                     content_type="ai-news",
                     priority=min(10, score // 50 + int(relevance * 5)),
                     scheduled_hour=hour,
-                    brief=f"News post about: {title}"
+                    brief=f"News post about: {title}",
+                    organization_id=org_id,
                 )
                 plans.append({"platform": platform, "type": "ai-news"})
 
     # Medium-relevance news → Discord only
     elif signal_type == "news" and relevance > 0.1:
-        current = get_todays_plan_count("discord") + get_todays_post_count("discord")
+        current = (get_todays_plan_count("discord", org_id)
+                   + get_todays_post_count("discord", org_id))
         if current < DEFAULT_LIMITS["discord"]["daily_cap"]:
             create_plan(
                 signal_id=signal["id"],
                 platform="discord",
                 content_type="ai-news",
                 priority=3,
-                brief=f"Quick news drop: {title}"
+                brief=f"Quick news drop: {title}",
+                organization_id=org_id,
             )
             plans.append({"platform": "discord", "type": "ai-news"})
 
@@ -141,35 +162,38 @@ def plan_signal(signal: Dict) -> List[Dict]:
         for platform in ["discord", "linkedin", "reddit"]:
             limits = DEFAULT_LIMITS.get(platform, {})
             cap = limits.get("daily_cap", 5)
-            current = get_todays_plan_count(platform) + get_todays_post_count(platform)
+            current = (get_todays_plan_count(platform, org_id)
+                       + get_todays_post_count(platform, org_id))
             if current < cap:
                 create_plan(
                     signal_id=signal["id"],
                     platform=platform,
                     content_type="repo-promo",
                     priority=7,
-                    brief=f"Promote repo: {title}"
+                    brief=f"Promote repo: {title}",
+                    organization_id=org_id,
                 )
                 plans.append({"platform": platform, "type": "repo-promo"})
 
     return plans
 
 
-async def run():
-    """Main planner run — process unprocessed signals."""
+async def run(organization_id: Optional[str] = None):
+    """Main planner run — process this organization's unprocessed signals."""
     from agents.scout import get_unprocessed_signals, mark_processed
 
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     init_plans_table()
-    print(f"[Planner] Starting at {datetime.now().strftime('%H:%M:%S')}")
+    print(f"[Planner] Starting at {datetime.now().strftime('%H:%M:%S')} for org '{org_id}'")
 
-    signals = get_unprocessed_signals(limit=15)
+    signals = get_unprocessed_signals(organization_id=org_id, limit=15)
     print(f"[Planner] Processing {len(signals)} unprocessed signals")
 
     total_plans = 0
     processed_ids = []
 
     for signal in signals:
-        plans = plan_signal(signal)
+        plans = plan_signal(signal, organization_id=org_id)
         total_plans += len(plans)
         processed_ids.append(signal["id"])
         if plans:
@@ -177,14 +201,15 @@ async def run():
             print(f"[Planner] Signal '{signal['title'][:50]}' → {platforms}")
 
     if processed_ids:
-        mark_processed(processed_ids)
+        mark_processed(processed_ids, organization_id=org_id)
 
     print(f"[Planner] Done — {total_plans} plans created from {len(signals)} signals")
     return total_plans
 
 
-def get_pending_plans(limit: int = 20) -> List[Dict]:
-    """Get planned content that hasn't been created yet."""
+def get_pending_plans(organization_id: Optional[str] = None, limit: int = 20) -> List[Dict]:
+    """Get this organization's planned content that hasn't been created yet."""
+    org_id = organization_id or DEFAULT_ORGANIZATION_ID
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     rows = conn.execute('''
@@ -192,16 +217,21 @@ def get_pending_plans(limit: int = 20) -> List[Dict]:
                s.source as signal_source
         FROM content_plans cp
         JOIN signals s ON cp.signal_id = s.id
-        WHERE cp.status = 'planned'
+        WHERE cp.status = 'planned' AND COALESCE(cp.organization_id, ?) = ?
         ORDER BY cp.priority DESC, cp.created_at ASC
         LIMIT ?
-    ''', (limit,)).fetchall()
+    ''', (DEFAULT_ORGANIZATION_ID, org_id, limit)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
 def mark_plan_completed(plan_id: int):
-    """Mark a plan as completed (content created)."""
+    """Mark a plan as completed (content created).
+
+    plan_id already comes from an organization-scoped read (get_pending_plans),
+    so this update does not need its own organization filter — it can only
+    ever touch a row the caller already knows belongs to their organization.
+    """
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute("UPDATE content_plans SET status = 'completed' WHERE id = ?", (plan_id,))
     conn.commit()
