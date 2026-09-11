@@ -23,12 +23,12 @@ Bảng kiểm kê route: `docs/KIEM_KE_ROUTE_DOT_3.md`.
 | G2 | Báo chi phí về core | `usage_bao_cao.py`; ảnh + video; không bao giờ ném |
 | G3 | Script đối chiếu | `scripts/doi_chieu_usage.py` |
 | H1 | Script gán tổ chức | `scripts/gan_to_chuc.py`, mặc định xem trước, idempotent |
+| E8 | Test hai tổ chức qua HTTP thật | `tests/test_hai_to_chuc.py`, 35 ca, `TestClient` gọi route thật |
 
 ## Chưa xong — cần máy thật
 
 | # | Việc | Vì sao chưa |
 |---|---|---|
-| E8 | Test hai tổ chức đầu-cuối | Cần máy chủ chạy thật; sandbox không có `fastapi`/`httpx` |
 | H1 | **CHẠY** script gán tổ chức | Cần UUID thật của AVI GIFT tại thời điểm cắt |
 | H2 | Đổi tên tệp phiên Playwright | Sau H1; nếu không, ba tài khoản phải đăng nhập lại |
 | H3 | Siết CORS | Cần biết origin thật (chờ quyết định domain, Nhóm C) |
@@ -64,6 +64,40 @@ SSO_SESSION_SECRET=<trùng với floraos-core>
 FLORAOS_CORE_BASE_URL=http://localhost:3100/api/v1
 FB_PAGE_OWNER_ORG_ID=<uuid AVI GIFT>
 ```
+
+## Lỗi CHỈ lộ ra khi chạy — 2026-09-11
+
+Bảy bộ test đầu của Đợt 3 kiểm bằng cây cú pháp hoặc hàm thuần. Chúng bắt được
+lỗi cấu trúc, nhưng không bắt được lỗi hành vi. `tests/test_hai_to_chuc.py`
+(E8) là bộ duy nhất dựng app thật và gọi route thật; ngay lần chạy đầu nó lôi
+ra bốn lỗi mà 179 ca tĩnh đã cho qua:
+
+| Lỗi | Cơ chế | Ai lộ ra |
+|---|---|---|
+| `accounts` mất cột `page_id`, `page_token_encrypted` | `_rebuild_accounts_unique_per_org` dựng lại bảng từ danh sách cột VIẾT CỨNG, chạy SAU lượt ADD COLUMN nên xoá mất cột vừa thêm | E8, lần chạy 1 |
+| `brand_config` không có `organization_id` | Bảng do `brand_kit.init_brand_tables()` tạo; nếu nó chạy SAU `run_migrations()` thì migration ghi "(table missing)" rồi bỏ qua vĩnh viễn | E8, lần chạy 2 |
+| `tests/test_asset_to_post.py` chưa bao giờ chạy sau E4 | 6 chỗ gọi `_carousel_slide_paths()` thiếu `organization_id` | chạy lại toàn bộ |
+| `tests/test_migrations.py` kiểm sai bảng | Vòng lặp lấy tập cột của riêng `assets` rồi đem đối chiếu cho cả 24 mục — đúng ngẫu nhiên khi mọi mục đều thuộc `assets`, im lặng sai từ lúc COLUMNS có thêm `accounts`/`brand_config`. Chính nó che mất lỗi thứ nhất | chạy lại toàn bộ |
+
+Hai lỗi đầu **không lộ ra trên cơ sở dữ liệu đang dùng** — ở đó các bước ấy đã
+chạy từ D1/A5 nên nay là no-op. Chúng chỉ lộ trên cơ sở dữ liệu MỚI: đúng lúc
+dựng môi trường mới, hoặc lúc khách hàng đầu tiên được tạo.
+
+Đã sửa:
+
+- `migrations.py`: tách `them_cot_con_thieu()`, gọi HAI lần — trước và sau lượt
+  dựng lại `accounts`. Lượt hai tự đúng mãi mãi, khác với việc vá danh sách cột
+  viết cứng (sẽ lại lạc hậu ở lần thêm cột tiếp theo). Báo cáo `added_columns`
+  kể tên mỗi cột một lần.
+- `duong_dan_db.py` (mới): mọi mô-đun lấy đường dẫn SQLite qua một chỗ, đọc
+  `SOCIALFLOW_DATABASE_PATH`. Trước đây chỉ cần `import main` là đã chạm vào cơ
+  sở dữ liệu THẬT — cuối `main.py` có `init_asset_tables()` và
+  `run_migrations()` chạy ngay lúc nạp mô-đun, nên bộ test không tránh được
+  bằng cách gán lại hằng số sau khi import.
+- `tests/test_migrations.py`: hỏi đúng bảng của từng cột; thêm kiểm chéo tổ
+  chức cho `_carousel_slide_paths`.
+
+Tổng cộng sau đợt sửa: 11 bộ test, 406 ca xanh.
 
 ## Nợ ghi lại trong đợt này
 

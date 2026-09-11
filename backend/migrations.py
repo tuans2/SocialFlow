@@ -25,9 +25,10 @@ import os
 import sqlite3
 from pathlib import Path
 from typing import List, Tuple
+from duong_dan_db import duong_dan_db
 
 BACKEND_DIR = Path(__file__).resolve().parent
-DATABASE_PATH = str(BACKEND_DIR / "socialflow.db")
+DATABASE_PATH = duong_dan_db()
 
 # Same env var and default as main.py — keep the two in sync, this module
 # normalizes NULL organization_id to this value when it rebuilds `accounts`.
@@ -265,16 +266,42 @@ def run_migrations(database_path: str = None) -> dict:
             if not existed:
                 created_tables.append(table)
 
-        for table, column, decl in COLUMNS:
-            if not _table_exists(conn, table):
-                skipped.append(f"{table}.{column} (table missing)")
-                continue
-            if column in _columns(conn, table):
-                continue
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
-            added_columns.append(f"{table}.{column}")
+        def them_cot_con_thieu(ghi_bo_qua: bool):
+            """Một lượt ADD COLUMN. Gọi HAI lần quanh lượt dựng lại `accounts`.
 
+            Vì sao hai lần: `_rebuild_accounts_unique_per_org` tạo lại bảng
+            `accounts` từ một danh sách cột VIẾT CỨNG, nên nó xoá mất bất kỳ
+            cột nào vừa được thêm ở lượt trước — `page_id` và
+            `page_token_encrypted` của Đợt 3/E6 là hai nạn nhân đầu tiên.
+
+            Lỗi này KHÔNG lộ ra trên cơ sở dữ liệu đã dùng: ở đó lượt dựng lại
+            đã chạy từ D1/A5 nên nay nó no-op. Nó chỉ lộ trên cơ sở dữ liệu
+            MỚI — tức là đúng lúc dựng môi trường mới hoặc chạy bộ test. Bắt
+            được nhờ `tests/test_hai_to_chuc.py` gọi route thật, không phải
+            nhờ đọc mã.
+
+            Gọi lượt hai thay vì sửa danh sách cột trong hàm dựng lại: danh
+            sách ấy sẽ lại lạc hậu ở lần thêm cột tiếp theo, còn lượt hai thì
+            tự đúng mãi mãi.
+            """
+            for table, column, decl in COLUMNS:
+                if not _table_exists(conn, table):
+                    if ghi_bo_qua:
+                        skipped.append(f"{table}.{column} (table missing)")
+                    continue
+                if column in _columns(conn, table):
+                    continue
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+                # Lượt hai thêm lại cột mà lượt dựng lại vừa xoá, nên cùng một
+                # cột có thể qua đây hai lần. Báo cáo là TÌNH TRẠNG CUỐI, không
+                # phải nhật ký thao tác — kể tên một lần.
+                if f"{table}.{column}" not in added_columns:
+                    added_columns.append(f"{table}.{column}")
+
+        them_cot_con_thieu(ghi_bo_qua=True)
         accounts_rebuilt = _rebuild_accounts_unique_per_org(conn)
+        if accounts_rebuilt:
+            them_cot_con_thieu(ghi_bo_qua=False)
 
         for name, table, column in INDEXES:
             if not _table_exists(conn, table):

@@ -107,10 +107,10 @@ children = sqlite3.connect(DB).execute(
     "SELECT count(*) FROM assets WHERE parent_asset_id = ?", (c2,)).fetchone()[0]
 check("second carousel has no parent-linked children", children, 0)
 
-check("...but it still knows its 3 slides", len(ar._carousel_slide_paths(c2)), 3)
-check("first carousel too", len(ar._carousel_slide_paths(c1)), 3)
+check("...but it still knows its 3 slides", len(ar._carousel_slide_paths(c2, organization_id=TO_CHUC)), 3)
+check("first carousel too", len(ar._carousel_slide_paths(c1, organization_id=TO_CHUC)), 3)
 check("both resolve to the same files",
-      ar._carousel_slide_paths(c1), ar._carousel_slide_paths(c2))
+      ar._carousel_slide_paths(c1, organization_id=TO_CHUC), ar._carousel_slide_paths(c2, organization_id=TO_CHUC))
 
 # a carousel from before the list existed still works via the back-pointer
 legacy = inv.register_asset(asset_type="carousel", source="old", title="legacy", organization_id=TO_CHUC)
@@ -119,7 +119,14 @@ ms.store_bytes(png((1, 2, 3)), declared_name="l1.png", origin="generated",
 ms.store_bytes(png((4, 5, 6)), declared_name="l2.png", origin="generated",
                parent_asset_id=legacy["asset_id"], organization_id=TO_CHUC)
 check("legacy carousel falls back to parent_asset_id",
-      len(ar._carousel_slide_paths(legacy["asset_id"])), 2)
+      len(ar._carousel_slide_paths(legacy["asset_id"], organization_id=TO_CHUC)), 2)
+
+# Đợt 3 / E4: danh sách slide cũng phải dừng ở ranh giới tổ chức. Không có
+# phép thử này thì một carousel vẫn trả đủ ảnh cho người của tổ chức khác.
+check("tổ chức khác KHÔNG lấy được slide của carousel này",
+      ar._carousel_slide_paths(c1, organization_id="to-chuc-khac"), [])
+check("  kể cả carousel kiểu cũ",
+      ar._carousel_slide_paths(legacy["asset_id"], organization_id="to-chuc-khac"), [])
 
 # ── metadata merge must not clobber ───────────────────────────────────────
 inv.update_asset(c1, metadata={"caption": "hello"}, organization_id=TO_CHUC)
@@ -137,7 +144,7 @@ check("reel with its video passes", ok, True)
 ok, err, _ = mu.validate_publish_media("instagram", "reel", None)
 check("reel without video is blocked", ok, False)
 
-slide_paths = ar._carousel_slide_paths(c2)
+slide_paths = ar._carousel_slide_paths(c2, organization_id=TO_CHUC)
 ok, err, media = mu.validate_publish_media("instagram", "carousel", slide_paths)
 check("carousel with 3 slides passes", ok, True)
 check("  all three resolve", len(media), 3)

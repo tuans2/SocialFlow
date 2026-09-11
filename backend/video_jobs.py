@@ -12,9 +12,10 @@ import sqlite3
 import uuid
 from pathlib import Path
 from typing import List, Optional
+from duong_dan_db import duong_dan_db
 
 BACKEND_DIR = Path(__file__).resolve().parent
-DATABASE_PATH = str(BACKEND_DIR / "socialflow.db")
+DATABASE_PATH = duong_dan_db()
 
 
 def _conn():

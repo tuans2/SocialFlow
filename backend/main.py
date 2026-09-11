@@ -44,10 +44,11 @@ from agents.orchestrator import (
 )
 from agents.scout import init_signals_table
 from agents.planner import init_plans_table
+from duong_dan_db import duong_dan_db
 
 # ============== CONFIG ==============
 BACKEND_DIR = Path(__file__).resolve().parent
-DATABASE_PATH = str(BACKEND_DIR / "socialflow.db")
+DATABASE_PATH = duong_dan_db()
 UPLOADS_DIR = BACKEND_DIR / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
 

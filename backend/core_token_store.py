@@ -17,8 +17,9 @@ gác bằng năng lực `F9`.
 import sqlite3
 from pathlib import Path
 from typing import Optional
+from duong_dan_db import duong_dan_db
 
-DATABASE_PATH = str(Path(__file__).resolve().parent / "socialflow.db")
+DATABASE_PATH = duong_dan_db()
 
 DDL = """
 CREATE TABLE IF NOT EXISTS core_integration_tokens (

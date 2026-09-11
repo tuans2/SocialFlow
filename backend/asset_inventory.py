@@ -24,10 +24,11 @@ import sqlite3
 from datetime import datetime
 from typing import Optional, List, Dict
 from pathlib import Path
+from duong_dan_db import duong_dan_db
 
 
 BACKEND_DIR = Path(__file__).resolve().parent
-DATABASE_PATH = str(BACKEND_DIR / "socialflow.db")
+DATABASE_PATH = duong_dan_db()
 
 
 def init_asset_tables():

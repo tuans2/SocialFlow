@@ -16,7 +16,7 @@ from pathlib import Path
 BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND))
 
-from migrations import COLUMNS, run_migrations  # noqa: E402
+from migrations import COLUMNS, TABLES, run_migrations  # noqa: E402
 
 PASS, FAIL = [], []
 
@@ -88,7 +88,11 @@ check("starts without the new columns",
 seeded.close()
 
 first = run_migrations(str(db))
-check("adds every declared column", len(first["added_columns"]), len(COLUMNS))
+# Các bảng trong TABLES do chính run_migrations() tạo, với đủ cột ngay từ DDL —
+# chúng không đi qua đường ALTER TABLE nên không có mặt trong `added_columns`.
+# Phép thử thật về tình trạng cuối là vòng lặp PRAGMA bên dưới.
+can_them = [f"{t}.{c}" for t, c, _ in COLUMNS if t not in TABLES]
+check("adds every declared column", sorted(first["added_columns"]), sorted(can_them))
 check("nothing skipped", first["skipped"], [])
 
 check("second run adds no columns", run_migrations(str(db))["added_columns"], [])
@@ -96,9 +100,16 @@ check("third run adds no columns", run_migrations(str(db))["added_columns"], [])
 
 conn = sqlite3.connect(db)
 conn.row_factory = sqlite3.Row
-cols = {r[1] for r in conn.execute("PRAGMA table_info(assets)")}
+# Đợt 3: phải hỏi ĐÚNG bảng của từng cột. Trước đây vòng lặp này lấy tập cột
+# của riêng `assets` rồi đem đối chiếu cho cả 24 mục — đúng ngẫu nhiên khi mọi
+# mục đều thuộc `assets`, và im lặng sai từ lúc COLUMNS có thêm accounts,
+# brand_config, video_jobs. Chính chỗ này đã che mất lỗi `accounts.page_id` bị
+# lượt dựng lại xoá mất.
+cot_theo_bang = {}
 for table, column, _ in COLUMNS:
-    check(f"{table}.{column} present", column in cols, True)
+    if table not in cot_theo_bang:
+        cot_theo_bang[table] = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    check(f"{table}.{column} present", column in cot_theo_bang[table], True)
 
 idx = {r[0] for r in conn.execute(
     "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_assets%'")}
@@ -124,7 +135,10 @@ check("  and they are queryable",
 bare = scratch / "bare.db"
 sqlite3.connect(bare).execute("CREATE TABLE unrelated (id INTEGER)")
 bare_result = run_migrations(str(bare))
-check("missing table is skipped, not fatal", len(bare_result["skipped"]), len(COLUMNS))
+# Không phải cả 24: run_migrations() tự CREATE TABLE các bảng trong TABLES
+# (video_jobs) trước khi rà cột, nên cột của chúng có mặt chứ không bị bỏ qua.
+bo_qua_du_kien = len([1 for t, _, _ in COLUMNS if t not in TABLES])
+check("missing table is skipped, not fatal", len(bare_result["skipped"]), bo_qua_du_kien)
 check("  nothing added to a bare db", bare_result["added_columns"], [])
 
 conn.close()

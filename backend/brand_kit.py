@@ -26,6 +26,7 @@ from org_context import require_org, sso_token_tho
 from pydantic import BaseModel
 
 from to_chuc import bat_buoc
+from duong_dan_db import duong_dan_db
 
 # Đợt 3 / E3 — cổng xác thực ở mức ROUTER: mọi route trong tệp này đòi một
 # JWT `floraos_sso` hợp lệ. Đây mới là lớp CHẶN; lớp LỌC theo tổ chức nằm ở
@@ -37,7 +38,7 @@ router = APIRouter(
     dependencies=[Depends(require_org)],
 )
 
-DB_PATH = Path(__file__).parent / "socialflow.db"
+DB_PATH = Path(duong_dan_db())
 UPLOADS_DIR = Path(__file__).parent / "uploads"
 
 # Cung hang so voi migrations.py/main.py/orchestrator.py.

@@ -20,8 +20,9 @@ import os
 import sqlite3
 from pathlib import Path
 from typing import Optional, Tuple
+from duong_dan_db import duong_dan_db
 
-DATABASE_PATH = str(Path(__file__).resolve().parent / "socialflow.db")
+DATABASE_PATH = duong_dan_db()
 
 
 def _co_cot(conn, bang: str, cot: str) -> bool:
