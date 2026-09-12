@@ -787,16 +787,49 @@
         
         const API = 'http://localhost:8000/api';
 
-        // API helper
+        // API helper — trước đây không kiểm `res.ok`, nên một lỗi HTTP (401, 404,
+        // 500, ...) bị âm thầm parse như JSON bình thường: nút bấm không có phản
+        // hồi gì, chỉ đứng im hoặc quay vòng loading mãi. Giờ ném lỗi có thông
+        // điệp rõ ràng khi request thất bại, để mọi nơi gọi (kể cả nơi không có
+        // try/catch riêng) đều có phản hồi qua listener `unhandledrejection` bên
+        // dưới thay vì im lặng.
+        async function apiCall(url, options) {
+            const res = await fetch(`${API}${url}`, options);
+            let body = null;
+            try {
+                body = await res.json();
+            } catch (e) {
+                body = null;
+            }
+            if (!res.ok) {
+                const message = (body && (body.error || body.detail || body.message))
+                    || (res.status === 401
+                        ? 'Not signed in — please sign in again.'
+                        : `Request failed (${res.status})`);
+                throw new Error(message);
+            }
+            return body;
+        }
+
         const api = {
-            get: async (url) => (await fetch(`${API}${url}`)).json(),
-            post: async (url, data) => (await fetch(`${API}${url}`, {
+            get: async (url) => apiCall(url),
+            post: async (url, data) => apiCall(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data)
-            })).json(),
-            delete: async (url) => (await fetch(`${API}${url}`, { method: 'DELETE' })).json()
+            }),
+            delete: async (url) => apiCall(url, { method: 'DELETE' })
         };
+
+        // Nhiều nơi gọi `api.get/post/delete` không có try/catch riêng (bấm nút
+        // rồi không thấy gì xảy ra khi lỗi). Bắt lỗi chưa được xử lý ở đây để ít
+        // nhất luôn có một thông báo hiện ra thay vì im lặng hoàn toàn.
+        window.addEventListener('unhandledrejection', (event) => {
+            if (event.reason instanceof Error) {
+                alert(event.reason.message || 'Request failed');
+                event.preventDefault();
+            }
+        });
 
         // Platform icons
         const icons = {
@@ -833,6 +866,7 @@
                 { id: 'video', icon: '🎬', label: 'Video/Reel Maker' },
                 { id: 'avatar', icon: '🧑‍💼', label: 'Avatar Videos' },
                 { id: 'library', icon: '📚', label: 'Media Library' },
+                { id: 'marketing', icon: '🎯', label: 'Marketing Creative' },
                 { id: 'posts', icon: icons.posts, label: 'All Posts' },
                 { id: 'accounts', icon: icons.accounts, label: 'Accounts' },
                 { id: 'settings', icon: icons.settings, label: 'Settings' },
@@ -899,7 +933,7 @@
                         </div>
                         <div className="stat-card">
                             <div className="stat-label">Connected</div>
-                            <div className="stat-value">{accounts.filter(a => a.is_logged_in).length}/3</div>
+                            <div className="stat-value">{accounts.filter(a => a.is_logged_in).length}/{ALL_PLATFORMS.length}</div>
                         </div>
                     </div>
 
@@ -3094,10 +3128,129 @@
                         {tab === 'video' && <VideoMaker onCreated={load} />}
                         {tab === 'avatar' && <AvatarMaker onCreated={load} />}
                         {tab === 'library' && <MediaLibrary />}
+                        {tab === 'marketing' && <MarketingCreative />}
                         {tab === 'posts' && <PostsList posts={posts} onDelete={deletePost} onPublish={publishPost} />}
                         {tab === 'accounts' && <Accounts accounts={accounts} onRefresh={load} />}
                         {tab === 'settings' && <Settings />}
                     </main>
+                </div>
+            );
+        }
+
+        function MarketingCreative() {
+            const [productId, setProductId] = useState('');
+            const [result, setResult] = useState(null);
+            const [error, setError] = useState('');
+            const [loading, setLoading] = useState(false);
+            const [log, setLog] = useState('');
+
+            const removeBackground = async () => {
+                if (!productId) return;
+                setLoading(true);
+                setError('');
+                setResult(null);
+                setLog('');
+                try {
+                    const res = await api.post('/m04b/background-removal', {
+                        product_id: productId
+                    });
+                    setResult(res);
+                    setLog('Background removal started. Status: ' + (res.status || 'PENDING'));
+                } catch (err) {
+                    setError(err.message || 'Background removal failed');
+                }
+                setLoading(false);
+            };
+
+            const downloadAsset = (assetId) => {
+                window.open(`http://localhost:8000/api/m04b/assets/${assetId}/download`, '_blank');
+            };
+
+            return (
+                <div>
+                    <div className="header">
+                        <h1 className="page-title">🎯 Marketing Creative</h1>
+                    </div>
+
+                    <div className="grid-2">
+                        <div className="card">
+                            <div className="card-title">🎨 AI Background Removal</div>
+                            <p style={{ color: 'var(--text-muted)', marginBottom: '20px', fontSize: '13px' }}>
+                                Remove background from a product image using AIC-11 background_removal.
+                                Takes a Master Image from core, removes background (rembg + PIL fallback),
+                                and registers the result as an asset.
+                            </p>
+
+                            <div className="form-group">
+                                <label className="form-label">Product ID</label>
+                                <input
+                                    type="text"
+                                    className="form-input"
+                                    placeholder="e.g., 550e8400-e29b-41d4-a716-446655440000"
+                                    value={productId}
+                                    onChange={e => setProductId(e.target.value)}
+                                />
+                            </div>
+
+                            <button className="btn btn-primary" onClick={removeBackground} disabled={loading || !productId} style={{ width: '100%' }}>
+                                {loading ? <><div className="spinner" /> Removing...</> : '🎯 Remove Background'}
+                            </button>
+
+                            {error && (
+                                <div style={{
+                                    background: 'rgba(239,68,68,0.1)',
+                                    border: '1px solid rgba(239,68,68,0.3)',
+                                    color: 'var(--danger)',
+                                    padding: '12px 14px',
+                                    borderRadius: '8px',
+                                    fontSize: '13px',
+                                    marginTop: '16px'
+                                }}>❌ {error}</div>
+                            )}
+
+                            {log && (
+                                <div style={{
+                                    background: 'var(--bg-dark)',
+                                    padding: '12px 14px',
+                                    borderRadius: '8px',
+                                    fontSize: '13px',
+                                    marginTop: '16px',
+                                    color: 'var(--text-dim)',
+                                    whiteSpace: 'pre-wrap'
+                                }}>{log}</div>
+                            )}
+                        </div>
+
+                        <div className="card">
+                            <div className="card-title">📦 Result</div>
+                            {result ? (
+                                <div>
+                                    <div style={{ marginBottom: '12px', fontSize: '13px', color: 'var(--text-muted)' }}>
+                                        <strong>Asset ID:</strong> {result.asset_id || '—'}
+                                    </div>
+                                    <div style={{ marginBottom: '12px', fontSize: '13px', color: 'var(--text-muted)' }}>
+                                        <strong>Storage:</strong> {result.storage_key || '—'}
+                                    </div>
+                                    <div style={{ marginBottom: '12px', fontSize: '13px', color: 'var(--text-muted)' }}>
+                                        <strong>Status:</strong> <span className="badge scheduled">{result.status || 'PENDING'}</span>
+                                    </div>
+                                    <div style={{ marginBottom: '12px', fontSize: '13px', color: 'var(--text-muted)' }}>
+                                        <strong>Size:</strong> {result.width}×{result.height}
+                                    </div>
+                                    {result.asset_id && (
+                                        <button className="btn btn-secondary" onClick={() => downloadAsset(result.asset_id)}>
+                                            ⬇️ Download Processed Image
+                                        </button>
+                                    )}
+                                </div>
+                            ) : (
+                                <div className="empty-state">
+                                    <div className="empty-icon">🎯</div>
+                                    <p>Result will appear here after background removal</p>
+                                </div>
+                            )}
+                        </div>
+                    </div>
                 </div>
             );
         }
