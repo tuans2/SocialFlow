@@ -27,7 +27,7 @@ class FacebookAutomation(SocialAutomation):
 
         try:
             await self.page.goto(self.LOGIN_URL)
-            await self.page.wait_for_load_state("networkidle")
+            await self.page.wait_for_load_state("domcontentloaded")
             await self.page.wait_for_timeout(2000)
 
             # Handle cookie consent
@@ -82,6 +82,27 @@ class FacebookAutomation(SocialAutomation):
                 or "two_step_verification" in self.page.url
             )
 
+            # If still on login page and running in visible browser mode, give the user 90s to enter password or 2FA
+            if still_on_login and not self.headless:
+                print("Waiting up to 90 seconds for user to complete login manually in browser...")
+                try:
+                    await self.page.wait_for_function(
+                        '() => {'
+                        '  const passInput = document.querySelector("input#pass, input[name="pass"]");'
+                        '  const isLoginPage = window.location.href.includes("/login") || window.location.href.includes("checkpoint");'
+                        '  return !isLoginPage && (!passInput || passInput.offsetParent === null);'
+                        '}',
+                        timeout=90000
+                    )
+                    await self.page.wait_for_timeout(3000)
+                    still_on_login = (
+                        await login_form.count() > 0
+                        or await password_form.count() > 0
+                        or "login" in self.page.url
+                    )
+                except Exception:
+                    pass
+
             if still_on_login:
                 return {
                     "success": False,
@@ -126,7 +147,8 @@ class FacebookAutomation(SocialAutomation):
         if await self.load_session(self.PLATFORM):
             try:
                 await self.page.goto(self.HOME_URL)
-                await self.page.wait_for_load_state("networkidle")
+                await self.page.wait_for_load_state("domcontentloaded")
+                await self.page.wait_for_timeout(3000)
                 login_form = self.page.locator(
                     'input#email:visible, input[name="email"]:visible'
                 ).first
@@ -134,6 +156,35 @@ class FacebookAutomation(SocialAutomation):
                 password_form = self.page.locator(
                     'input#pass:visible, input[name="pass"]:visible'
                 ).first
+
+                # Auto re-auth if "Tiếp tục" checkpoint is displayed
+                tiep_tuc = self.page.locator('button:has-text("Tiếp tục"), div[role="button"]:has-text("Tiếp tục")').first
+                if await tiep_tuc.is_visible():
+                    await tiep_tuc.click()
+                    await self.page.wait_for_timeout(2000)
+                    pass_input = self.page.locator('input#pass:visible, input[name="pass"]:visible').first
+                    if await pass_input.is_visible():
+                        try:
+                            from main import decrypt, get_db
+                            conn = get_db()
+                            c = conn.cursor()
+                            c.execute(
+                                "SELECT password_encrypted FROM accounts WHERE platform = 'facebook' AND organization_id = ?",
+                                (self.organization_id,)
+                            )
+                            row = c.fetchone()
+                            conn.close()
+                            if row and row[0]:
+                                pw = decrypt(row[0])
+                                await pass_input.fill(pw)
+                                await self.page.keyboard.press("Enter")
+                                await self.page.wait_for_timeout(4000)
+                                await self.save_session(self.PLATFORM)
+                        except Exception:
+                            pass
+
+                login_form = self.page.locator('input#email:visible, input[name="email"]:visible').first
+                password_form = self.page.locator('input#pass:visible, input[name="pass"]:visible').first
 
                 if (
                     "login" in self.page.url
@@ -157,6 +208,32 @@ class FacebookAutomation(SocialAutomation):
             await self.page.goto(self.HOME_URL)
             await self.page.wait_for_load_state("domcontentloaded")
             await self.page.wait_for_timeout(3000)
+
+            # Auto re-auth if "Tiếp tục" checkpoint is displayed
+            tiep_tuc = self.page.locator('button:has-text("Tiếp tục"), div[role="button"]:has-text("Tiếp tục")').first
+            if await tiep_tuc.is_visible():
+                await tiep_tuc.click()
+                await self.page.wait_for_timeout(2000)
+                pass_input = self.page.locator('input#pass:visible, input[name="pass"]:visible').first
+                if await pass_input.is_visible():
+                    try:
+                        from main import decrypt, get_db
+                        conn = get_db()
+                        c = conn.cursor()
+                        c.execute(
+                            "SELECT password_encrypted FROM accounts WHERE platform = 'facebook' AND organization_id = ?",
+                            (self.organization_id,)
+                        )
+                        row = c.fetchone()
+                        conn.close()
+                        if row and row[0]:
+                            pw = decrypt(row[0])
+                            await pass_input.fill(pw)
+                            await self.page.keyboard.press("Enter")
+                            await self.page.wait_for_timeout(4000)
+                            await self.save_session(self.PLATFORM)
+                    except Exception as e:
+                        print(f"Facebook auto re-auth error: {e}")
 
             # Verify the saved Facebook session is still authenticated.
             login_form = self.page.locator(

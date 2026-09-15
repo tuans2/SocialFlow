@@ -77,7 +77,7 @@ def get_by_provider_job(provider_job_id: str, *, organization_id: str) -> Option
         return _row(conn.execute(
             "SELECT * FROM video_jobs WHERE provider_job_id = ? AND organization_id = ? "
             "ORDER BY id DESC LIMIT 1",
-            (provider_job_id,)).fetchone())
+            (provider_job_id, organization_id)).fetchone())
     finally:
         conn.close()
 
@@ -91,7 +91,7 @@ def update(job_id: str, *, organization_id: str, **fields) -> Optional[dict]:
         sets.append(f"{key} = ?")
         params.append(json.dumps(value) if key == "params" else value)
     if not sets:
-        return get(job_id)
+        return get(job_id, organization_id=organization_id)
     sets.append("updated_at = CURRENT_TIMESTAMP")
     params.append(job_id)
     conn = _conn()
@@ -105,7 +105,7 @@ def update(job_id: str, *, organization_id: str, **fields) -> Optional[dict]:
         conn.commit()
     finally:
         conn.close()
-    return get(job_id)
+    return get(job_id, organization_id=organization_id)
 
 
 def recent(limit: int = 25, status: str = None, *, organization_id: str) -> List[dict]:

@@ -206,8 +206,16 @@ def get_pillar_performance(days: int = 30, organization_id: Optional[str] = None
     return rows
 
 
-def generate_weekly_summary(week_start: str = None) -> dict:
-    """Generate weekly performance summary"""
+def generate_weekly_summary(week_start: str = None, organization_id: Optional[str] = None) -> dict:
+    """Generate weekly performance summary, scoped to one organization.
+
+    Đợt 5 (rà soát bảo mật): trước sửa này hàm KHÔNG lọc theo tổ chức — khác
+    ba hàm chị em (`get_platform_performance`/`get_top_content_types`/
+    `get_pillar_performance`) đều bắt buộc `organization_id`. Số liệu tổng
+    (posts/impressions/engagement) và `top_posts` (post_ref/topic) sẽ gộp
+    của MỌI tổ chức nếu không sửa.
+    """
+    org_id = bat_buoc(organization_id)
     if not week_start:
         today = datetime.now()
         start = today - timedelta(days=today.weekday() + 7)
@@ -226,16 +234,18 @@ def generate_weekly_summary(week_start: str = None) -> dict:
                         AVG(engagement_rate) as avg_rate
                  FROM post_metrics
                  WHERE published_at BETWEEN ? AND ?
+                   AND organization_id = ?
                  GROUP BY platform""",
-              (week_start, week_end + "T23:59:59"))
+              (week_start, week_end + "T23:59:59", org_id))
 
     platforms = {row["platform"]: dict(row) for row in c.fetchall()}
 
     c.execute("""SELECT post_ref, platform, engagement_rate, topic
                  FROM post_metrics
                  WHERE published_at BETWEEN ? AND ?
+                   AND organization_id = ?
                  ORDER BY engagement_rate DESC LIMIT 3""",
-              (week_start, week_end + "T23:59:59"))
+              (week_start, week_end + "T23:59:59", org_id))
 
     top_posts = [dict(r) for r in c.fetchall()]
     conn.close()
@@ -285,11 +295,15 @@ def register_analytics_routes(app):
         clicks: int = 0
         video_views: int = 0
         notes: str = ""
-        organization_id: Optional[str] = None
+        # Đợt 5 (rà soát bảo mật): trường organization_id ĐÃ BỊ BỎ khỏi model
+        # này — trước đây route lấy thẳng giá trị client tự khai trong body,
+        # nên tổ chức B có thể ghi số liệu giả vào post_metrics của tổ chức A
+        # bằng cách khai organization_id của A. Giá trị đúng luôn đến từ
+        # `require_org` (JWT đã xác minh), không bao giờ từ JSON người gọi gửi.
 
     @router.post("/metrics")
-    async def add_metrics(m: MetricsInput):
-        result = record_post_metrics(**m.dict())
+    async def add_metrics(m: MetricsInput, organization_id: str = Depends(require_org)):
+        result = record_post_metrics(organization_id=organization_id, **m.dict())
         return {"success": True, "result": result}
 
     @router.get("/platform/{platform}")
@@ -306,7 +320,7 @@ def register_analytics_routes(app):
 
     @router.get("/weekly-summary")
     async def weekly(week_start: str = None, organization_id: str = Depends(require_org)):
-        return generate_weekly_summary(week_start, organization_id)
+        return generate_weekly_summary(week_start, organization_id=organization_id)
 
     app.include_router(router)
 

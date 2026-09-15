@@ -8,3 +8,7 @@ python-dotenv==1.0.0
 playwright==1.60.0
 cryptography==42.0.0
 pillow==10.2.0
+rembg==2.0.61
+# rembg model (u2net.onnx, ~176MB) tải tự lần đầu gọi
+# từ https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx
+# Lưu tại ~/.u2net/u2net.onnx

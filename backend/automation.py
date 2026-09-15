@@ -172,46 +172,63 @@ class LinkedInAutomation(SocialAutomation):
             await self.page.wait_for_load_state("domcontentloaded")
             await self.page.wait_for_timeout(2000)
             
-            # Click "Start a post" button
-            start_post_btn = self.page.get_by_role(
-                "button", name="Start a post", exact=True
-            )
-            await start_post_btn.wait_for(state="visible", timeout=10000)
-            await start_post_btn.click(no_wait_after=True)
+            # Click "Start a post" button (supports both English, Vietnamese, and data-view selectors)
+            try:
+                start_post_btn = self.page.get_by_role("button", name="Start a post", exact=True)
+                await start_post_btn.wait_for(state="visible", timeout=5000)
+                await start_post_btn.click(no_wait_after=True)
+            except Exception:
+                start_post_btn = self.page.locator(
+                    'button:has-text("Start a post"), button:has-text("Bắt đầu bài viết"), button.share-box-feed-entry__trigger, [data-view-name="feed-share-box-trigger"]'
+                ).first
+                await start_post_btn.wait_for(state="visible", timeout=8000)
+                await start_post_btn.click(no_wait_after=True)
             await self.page.wait_for_timeout(1500)
             
-            # Find the post editor
-            editor = self.page.get_by_role(
-                "textbox",
-                name="Text editor for creating content",
-                exact=True
-            )
+            # Find the post editor (supports new Tiptap/ProseMirror and legacy textbox)
+            editor = self.page.locator(
+                '.tiptap.ProseMirror, .ProseMirror, div[contenteditable="true"][role="textbox"], div[contenteditable="true"], [role="textbox"]'
+            ).first
             await editor.wait_for(state="visible", timeout=10000)
             
             # Type content
             await editor.click()
-            await self.page.keyboard.type(content, delay=20)
+            await self.page.keyboard.type(content, delay=15)
             await self.page.wait_for_timeout(1000)
             
             # Handle images if provided
             if image_paths:
-                # Click media button
-                media_btn = await self.page.query_selector('button[aria-label*="Add media"], button:has-text("Media")')
-                if media_btn:
+                media_btn = self.page.locator(
+                    'button[aria-label="Media"], button[aria-label*="media" i], button:has-text("Media"), button:has-text("Phương tiện")'
+                ).first
+                if await media_btn.is_visible():
                     await media_btn.click()
-                    await self.page.wait_for_timeout(500)
+                    await self.page.wait_for_timeout(1000)
                     
-                    # Upload images
-                    file_input = await self.page.wait_for_selector('input[type="file"]')
-                    await file_input.set_input_files(image_paths)
-                    await self.page.wait_for_timeout(2000)
+                    file_input = await self.page.wait_for_selector('input[type="file"]', state="attached", timeout=8000)
+                    if file_input:
+                        await file_input.set_input_files(image_paths)
+                        await self.page.wait_for_timeout(2500)
+                        
+                        # Next button in photo preview dialog
+                        next_btn = self.page.locator(
+                            'button:has-text("Next"), button:has-text("Tiếp tục"), button:has-text("Xong"), button:has-text("Done")'
+                        ).first
+                        if await next_btn.is_visible():
+                            await next_btn.click()
+                            await self.page.wait_for_timeout(1000)
             
             # Click Post button
-            post_btn = self.page.get_by_role(
-                "button", name="Post", exact=True
-            )
-            await post_btn.wait_for(state="visible", timeout=10000)
-            await post_btn.click(no_wait_after=True)
+            try:
+                post_btn = self.page.locator(
+                    'button.share-actions__primary-action, button:has-text("Post"), button:has-text("Đăng")'
+                ).first
+                await post_btn.wait_for(state="visible", timeout=10000)
+                await post_btn.click(no_wait_after=True)
+            except Exception:
+                post_btn = self.page.get_by_role("button", name="Post", exact=True)
+                await post_btn.wait_for(state="visible", timeout=5000)
+                await post_btn.click(no_wait_after=True)
             
             # Wait for post to complete
             await self.page.wait_for_timeout(3000)

@@ -7,15 +7,18 @@ import os
 import json
 import sqlite3
 import asyncio
+import hmac
 from datetime import datetime, timedelta
 from typing import Optional, List
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-load_dotenv()
+_backend_dir = Path(__file__).resolve().parent
+load_dotenv(_backend_dir / ".env")
+load_dotenv(_backend_dir.parent / ".env")
 
-from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form
+from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form, Header
 from fastapi.middleware.cors import CORSMiddleware
 
 from org_context import require_org
@@ -25,6 +28,7 @@ from pydantic import BaseModel
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from cryptography.fernet import Fernet
 
 from automation import get_automation, LinkedInAutomation, InstagramAutomation, TwitterAutomation
@@ -37,6 +41,8 @@ from migrations import run_migrations
 from analytics_store import init_analytics_tables, register_analytics_routes
 from visual_content_routes import router as visual_router
 from brand_kit import router as brand_router, init_brand_tables
+from m04b.routes import router as m04b_router
+from m07.routes import router as m07_router
 from agents.orchestrator import (
     run_full_pipeline, run_publish_only, run_scout_only, run_analyst_only,
     run_scheduled_cycle, run_for_organizations, list_known_organizations,
@@ -81,7 +87,7 @@ SESSIONS_DIR.mkdir(exist_ok=True)
 
 # Encryption for credentials
 def get_or_create_key():
-    key_file = Path(".secret_key")
+    key_file = BACKEND_DIR / ".secret_key"
     if key_file.exists():
         return key_file.read_bytes()
     key = Fernet.generate_key()
@@ -104,7 +110,7 @@ def load_config():
         "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY", ""),
         "AI_PROVIDER": os.getenv("AI_PROVIDER", "ollama"),  # ollama (free), openai, anthropic, gemini
         "OLLAMA_URL": os.getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
-        "OLLAMA_MODEL": os.getenv("OLLAMA_MODEL", "qwen3:8b"),
+        "OLLAMA_MODEL": os.getenv("OLLAMA_MODEL", "qwen2.5:7b"),
         "KLING_API_KEY": os.getenv("KLING_API_KEY", ""),
         "HEYGEN_EMAIL": os.getenv("HEYGEN_EMAIL", ""),
         "HEYGEN_PASSWORD": os.getenv("HEYGEN_PASSWORD", ""),
@@ -263,25 +269,25 @@ class PostUpdate(BaseModel):
 # ============== AI CONTENT GENERATION (Multi-Provider) ==============
 SYSTEM_PROMPT = "You are an expert social media content creator. Create engaging, viral-worthy content optimized for each platform. Be creative, authentic, and focus on value."
 
-async def generate_content_ai(prompt: str) -> str:
-    """Generate content using the configured AI provider (OpenAI, Anthropic, Gemini, or Ollama)"""
-    provider = CONFIG.get("AI_PROVIDER", "openai").lower()
+async def generate_content_ai(prompt: str, provider: Optional[str] = None, model: Optional[str] = None) -> str:
+    """Generate content using requested or configured AI provider (OpenAI, Anthropic, Gemini, or Ollama)"""
+    chosen_provider = (provider or CONFIG.get("AI_PROVIDER", "ollama")).lower()
 
-    if provider == "anthropic":
-        return await _generate_anthropic(prompt)
-    elif provider == "gemini":
-        return await _generate_gemini(prompt)
-    elif provider == "ollama":
-        return await _generate_ollama(prompt)
+    if chosen_provider == "anthropic":
+        return await _generate_anthropic(prompt, model=model)
+    elif chosen_provider == "gemini":
+        return await _generate_gemini(prompt, model=model)
+    elif chosen_provider in ("openai", "gpt"):
+        return await _generate_openai(prompt, model=model)
     else:
-        return await _generate_openai(prompt)
+        return await _generate_ollama(prompt, model=model)
 
 
-async def _generate_ollama(prompt: str) -> str:
+async def _generate_ollama(prompt: str, model: Optional[str] = None) -> str:
     """Generate content using local Ollama (FREE — no API key needed)"""
     import re
     ollama_url = CONFIG.get("OLLAMA_URL", "http://127.0.0.1:11434")
-    ollama_model = CONFIG.get("OLLAMA_MODEL", "qwen3:8b")
+    ollama_model = model or CONFIG.get("OLLAMA_MODEL", "qwen2.5:7b")
 
     async with httpx.AsyncClient() as client:
         try:
@@ -292,7 +298,7 @@ async def _generate_ollama(prompt: str) -> str:
                     "prompt": prompt,
                     "system": SYSTEM_PROMPT,
                     "stream": False,
-                    "options": {"temperature": 0.4, "num_predict": 500}
+                    "options": {"temperature": 0.7, "num_predict": 1200}
                 },
                 timeout=90.0
             )
@@ -312,7 +318,7 @@ async def _generate_ollama(prompt: str) -> str:
             )
 
 
-async def _generate_openai(prompt: str) -> str:
+async def _generate_openai(prompt: str, model: Optional[str] = None) -> str:
     """Generate content using OpenAI GPT-4o"""
     if not CONFIG["OPENAI_API_KEY"]:
         raise HTTPException(
@@ -320,6 +326,7 @@ async def _generate_openai(prompt: str) -> str:
             detail="OpenAI API key not configured. Add OPENAI_API_KEY to your .env file."
         )
 
+    openai_model = model or "gpt-4o"
     async with httpx.AsyncClient() as client:
         response = await client.post(
             "https://api.openai.com/v1/chat/completions",
@@ -328,7 +335,7 @@ async def _generate_openai(prompt: str) -> str:
                 "Content-Type": "application/json"
             },
             json={
-                "model": "gpt-4o",
+                "model": openai_model,
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": prompt}
@@ -388,7 +395,7 @@ async def _generate_anthropic(prompt: str) -> str:
         return response.json()["content"][0]["text"]
 
 
-async def _generate_gemini(prompt: str) -> str:
+async def _generate_gemini(prompt: str, model: Optional[str] = None) -> str:
     """Generate content using Google Gemini (free tier available)"""
     if not CONFIG["GEMINI_API_KEY"]:
         raise HTTPException(
@@ -396,10 +403,11 @@ async def _generate_gemini(prompt: str) -> str:
             detail="Gemini API key not configured. Add GEMINI_API_KEY to your .env file. Get your key at aistudio.google.com"
         )
 
+    gemini_model = model or "gemini-3.6-flash"
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={CONFIG['GEMINI_API_KEY']}",
+                f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent?key={CONFIG['GEMINI_API_KEY']}",
                 headers={"Content-Type": "application/json"},
                 json={
                     "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
@@ -894,6 +902,40 @@ async def lifespan(app: FastAPI):
         )
     conn.close()
 
+    # Periodic poller: check for due scheduled posts every 30 seconds
+    async def _poll_due_scheduled_posts():
+        """Auto-publish any scheduled posts whose scheduled_time has arrived."""
+        now_utc = datetime.utcnow().isoformat()
+        now_local = datetime.now().isoformat()
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            # Catch posts that are due based on either UTC or local timestamp to prevent timezone mismatch
+            c.execute(
+                """SELECT id FROM posts 
+                   WHERE status = 'scheduled' 
+                   AND (scheduled_time IS NULL OR scheduled_time <= ? OR scheduled_time <= ?)
+                   ORDER BY id ASC LIMIT 3""",
+                (now_utc, now_local)
+            )
+            due_ids = [r[0] for r in c.fetchall()]
+            conn.close()
+            for pid in due_ids:
+                print(f"[Scheduler] Auto-publishing due scheduled post #{pid}...", flush=True)
+                try:
+                    await publish_scheduled_post(pid)
+                except Exception as ex_post:
+                    print(f"[Scheduler] Auto-publish error for #{pid}: {ex_post}", flush=True)
+        except Exception as ex_poll:
+            print(f"[Scheduler] Poll error: {ex_poll}", flush=True)
+
+    scheduler.add_job(
+        _poll_due_scheduled_posts,
+        IntervalTrigger(seconds=30),
+        id="auto_poll_due_posts",
+        replace_existing=True
+    )
+
     print("SocialFlow started — autonomous pipeline scheduled")
     print("  8:07 AM  — Full pipeline (Scout → Planner → Creator → Reviewer)")
     print("  11:00 AM — Publish approved content")
@@ -942,6 +984,10 @@ app.add_middleware(
 
 # Register OpenClaw bridge routes
 app.include_router(openclaw_router)
+# Register M04b marketing creative routes
+app.include_router(m04b_router)
+# Register M07 AI content engine routes
+app.include_router(m07_router)
 # Register HeyGen video + asset inventory routes
 app.include_router(heygen_router)
 # Initialize asset inventory tables, then apply any pending column additions.
@@ -1265,8 +1311,8 @@ async def delete_account(platform: str, organization_id: str = Depends(require_o
     if not deleted:
         raise HTTPException(status_code=404, detail="Account not found")
 
-    # Delete session file
-    session_file = SESSIONS_DIR / f"{platform.lower()}_session.json"
+    # Delete session file (scoped to this organization)
+    session_file = SESSIONS_DIR / f"{org_id}_{platform.lower()}_session.json"
     if session_file.exists():
         session_file.unlink()
 
@@ -2307,7 +2353,28 @@ class ConfigUpdate(BaseModel):
     ZALO_SECRET_KEY: Optional[str] = None
     ZALO_REFRESH_TOKEN: Optional[str] = None
 
-@app.post("/api/config")
+
+async def require_admin_secret(x_admin_secret: Optional[str] = Header(default=None)):
+    """Đợt 5 (rà soát bảo mật) — nghiêm trọng nhất: trước sửa này, endpoint bên
+    dưới không đòi bất kỳ xác thực nào — ai trên internet cũng POST được để
+    ghi đè OPENAI_API_KEY/ANTHROPIC_API_KEY dùng chung cho MỌI tổ chức
+    (chiếm đoạt chi phí, hoặc phá sinh nội dung của toàn nền tảng).
+
+    Đây KHÔNG phải dữ liệu theo tổ chức — nó là cấu hình nhà cung cấp AI dùng
+    chung của cả nền tảng (quyết định D2) — nên `require_org` (bất kỳ ai có
+    phiên hợp lệ của MỘT tổ chức) không phải cổng đúng: một khách hàng bình
+    thường vẫn không được phép đổi khoá của người khác. Repo này chưa có khái
+    niệm vai trò quản trị nền tảng, nên cổng tạm thời là một bí mật vận hành
+    riêng (`SOCIALFLOW_ADMIN_SECRET`), tách khỏi mọi token của tổ chức.
+    Thiếu cấu hình biến môi trường này thì CHẶN LUÔN (an toàn khi chưa cấu
+    hình), không rơi về mở như trước.
+    """
+    expected = os.getenv("SOCIALFLOW_ADMIN_SECRET", "")
+    if not expected or not x_admin_secret or not hmac.compare_digest(x_admin_secret, expected):
+        raise HTTPException(status_code=401, detail="Thiếu hoặc sai X-Admin-Secret")
+
+
+@app.post("/api/config", dependencies=[Depends(require_admin_secret)])
 async def update_config(new_config: ConfigUpdate):
     global CONFIG
     for key, value in new_config.model_dump(exclude_none=True).items():

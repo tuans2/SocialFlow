@@ -29,12 +29,19 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict
 from automation import SocialAutomation, SESSIONS_DIR
+from migrations import DEFAULT_ORGANIZATION_ID
+from to_chuc import bat_buoc
 
 
 # ─── CONSTANTS ────────────────────────────────────────────────
 HEYGEN_ASSETS_DIR = Path("uploads/heygen")
 HEYGEN_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Đợt 5 (rà soát bảo mật): file này từng là một kho DÙNG CHUNG cho mọi tổ
+# chức — không job nào mang organization_id, nên GET /jobs, GET /jobs/{id},
+# và đặc biệt POST /jobs/{id}/distribute cho phép tổ chức B đọc/mượn video
+# và kịch bản của tổ chức A. Mọi hàm dưới đây nay bắt buộc organization_id
+# và lọc trên đó, đúng khuôn asset_inventory.py/video_jobs.py đã dùng.
 HEYGEN_JOBS_FILE = Path("heygen_jobs.json")
 
 
@@ -75,9 +82,16 @@ class HeyGenJobState:
 def _load_jobs() -> List[dict]:
     if HEYGEN_JOBS_FILE.exists():
         try:
-            return json.loads(HEYGEN_JOBS_FILE.read_text())
+            jobs = json.loads(HEYGEN_JOBS_FILE.read_text())
         except Exception:
             return []
+        # Job ghi trước Đợt 5 không mang organization_id — quy về tổ chức mặc
+        # định, cùng quy ước migrations.py áp cho dữ liệu tiền-di-trú của các
+        # bảng SQLite khác. Không ghi lại tệp ở đây (đọc phải là thao tác
+        # không tác dụng phụ); chỉ backfill khi thật sự lưu ở _save_jobs.
+        for j in jobs:
+            j.setdefault("organization_id", DEFAULT_ORGANIZATION_ID)
+        return jobs
     return []
 
 
@@ -87,6 +101,8 @@ def _save_jobs(jobs: List[dict]):
 
 def create_heygen_job(
     script: str,
+    *,
+    organization_id: str,
     campaign: str = "",
     topic: str = "",
     platform_targets: List[str] = None,
@@ -95,11 +111,13 @@ def create_heygen_job(
     duration_target: int = 30,
     metadata: dict = None
 ) -> dict:
-    """Create a new HeyGen video generation job"""
+    """Create a new HeyGen video generation job, scoped to one organization."""
+    org_id = bat_buoc(organization_id)
     job_id = f"hg-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{os.urandom(3).hex()}"
 
     job = {
         "job_id": job_id,
+        "organization_id": org_id,
         "state": HeyGenJobState.DRAFT,
         "script": script,
         "campaign": campaign,
@@ -127,12 +145,19 @@ def create_heygen_job(
     return job
 
 
-def update_job_state(job_id: str, new_state: str, **kwargs) -> dict:
-    """Transition a job to a new state with validation"""
+def update_job_state(job_id: str, new_state: str, *, organization_id: str, **kwargs) -> dict:
+    """Transition a job to a new state with validation, scoped to one organization.
+
+    A job belonging to another organization is reported as "not found" — the
+    same way a wrong-org SQL row lookup behaves elsewhere in this app — never
+    as a permission error, so this endpoint cannot be used to confirm another
+    organization's job_id exists.
+    """
+    org_id = bat_buoc(organization_id)
     jobs = _load_jobs()
 
     for job in jobs:
-        if job["job_id"] == job_id:
+        if job["job_id"] == job_id and job.get("organization_id") == org_id:
             current = job["state"]
 
             if not HeyGenJobState.can_transition(current, new_state):
@@ -174,15 +199,19 @@ def update_job_state(job_id: str, new_state: str, **kwargs) -> dict:
     return {"success": False, "error": f"Job {job_id} not found"}
 
 
-def get_job(job_id: str) -> Optional[dict]:
+def get_job(job_id: str, *, organization_id: str) -> Optional[dict]:
+    """A job belonging to another organization is invisible (returns None),
+    not just unreadable — same 404-not-403 rule as every other lookup here."""
+    org_id = bat_buoc(organization_id)
     for job in _load_jobs():
-        if job["job_id"] == job_id:
+        if job["job_id"] == job_id and job.get("organization_id") == org_id:
             return job
     return None
 
 
-def list_jobs(state: str = None, limit: int = 50) -> List[dict]:
-    jobs = _load_jobs()
+def list_jobs(*, organization_id: str, state: str = None, limit: int = 50) -> List[dict]:
+    org_id = bat_buoc(organization_id)
+    jobs = [j for j in _load_jobs() if j.get("organization_id") == org_id]
     if state:
         jobs = [j for j in jobs if j["state"] == state]
     return list(reversed(jobs[-limit:]))
@@ -293,7 +322,7 @@ class HeyGenVideoAdapter(SocialAutomation):
         Note: HeyGen's UI changes frequently. This targets the v3 editor.
         If selectors break, the job fails gracefully with logs.
         """
-        job = get_job(job_id)
+        job = get_job(job_id, organization_id=self.organization_id)
         if not job:
             return {"success": False, "error": f"Job {job_id} not found"}
 
@@ -302,14 +331,17 @@ class HeyGenVideoAdapter(SocialAutomation):
 
         # Transition to queued then generating
         if job["state"] == HeyGenJobState.DRAFT:
-            update_job_state(job_id, HeyGenJobState.QUEUED, details="Moving to queue")
+            update_job_state(job_id, HeyGenJobState.QUEUED, organization_id=self.organization_id,
+                             details="Moving to queue")
 
         await self.init_browser()
         if not await self.load_session(self.PLATFORM):
-            update_job_state(job_id, HeyGenJobState.FAILED, error="Not logged in to HeyGen")
+            update_job_state(job_id, HeyGenJobState.FAILED, organization_id=self.organization_id,
+                             error="Not logged in to HeyGen")
             return {"success": False, "error": "Not logged in to HeyGen. Login first."}
 
-        update_job_state(job_id, HeyGenJobState.GENERATING, details="Browser automation started")
+        update_job_state(job_id, HeyGenJobState.GENERATING, organization_id=self.organization_id,
+                         details="Browser automation started")
 
         try:
             # Navigate to HeyGen video creator
@@ -374,6 +406,7 @@ class HeyGenVideoAdapter(SocialAutomation):
                     update_job_state(
                         job_id,
                         HeyGenJobState.GENERATING,
+                        organization_id=self.organization_id,
                         details="Generation started in the HeyGen editor. "
                                 "Register the output when it is ready.",
                         output_url=self.page.url
@@ -398,6 +431,7 @@ class HeyGenVideoAdapter(SocialAutomation):
                     update_job_state(
                         job_id,
                         HeyGenJobState.FAILED,
+                        organization_id=self.organization_id,
                         error="Script loaded but the Generate button was not found; "
                               "nothing was rendered. Press Generate in the editor, "
                               "or use the HeyGen API provider instead.",
@@ -417,6 +451,7 @@ class HeyGenVideoAdapter(SocialAutomation):
                 update_job_state(
                     job_id,
                     HeyGenJobState.FAILED,
+                    organization_id=self.organization_id,
                     error="Script input not found in the HeyGen editor; the script "
                           "was never entered and nothing was rendered.",
                 )
@@ -430,7 +465,8 @@ class HeyGenVideoAdapter(SocialAutomation):
                 }
 
         except Exception as e:
-            update_job_state(job_id, HeyGenJobState.FAILED, error=str(e))
+            update_job_state(job_id, HeyGenJobState.FAILED, organization_id=self.organization_id,
+                             error=str(e))
             return {
                 "success": False,
                 "job_id": job_id,
@@ -445,6 +481,7 @@ class HeyGenVideoAdapter(SocialAutomation):
         """
         job = create_heygen_job(
             script=content,
+            organization_id=self.organization_id,
             topic=content[:100],
             platform_targets=["instagram", "youtube", "linkedin"]
         )

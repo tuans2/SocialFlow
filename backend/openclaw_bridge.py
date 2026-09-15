@@ -92,6 +92,7 @@ async def openclaw_publish(request: OpenClawPublishRequest, organization_id: str
     # Dry run — just validate and return
     if request.dry_run:
         log_bridge_event({
+            "organization_id": organization_id,
             "timestamp": timestamp,
             "platform": platform,
             "content_type": request.content_type,
@@ -107,22 +108,36 @@ async def openclaw_publish(request: OpenClawPublishRequest, organization_id: str
             "content_preview": request.content[:200]
         }
 
-    # Get Discord webhook from config if needed
+    # Đợt 5 (rà soát bảo mật): trước đây Discord/Substack đọc MỘT tệp cấu hình
+    # dùng chung cho mọi tổ chức (discord_webhook.json / substack_config.json)
+    # — tổ chức B gọi endpoint này thì nội dung của B bị đăng lên Discord/
+    # Substack của tổ chức A. Discord nay đọc đúng webhook của TỔ CHỨC NÀY từ
+    # `accounts`, cùng cách agents/publisher.py._publish_discord() đã làm cho
+    # đường lịch đăng tự động — cùng một nguồn sự thật, không phải hai đường
+    # đọc khác nhau cho cùng một dữ liệu.
     kwargs = {}
     if platform == "discord":
-        config_path = Path("discord_webhook.json")
-        if config_path.exists():
-            discord_config = json.loads(config_path.read_text())
-            kwargs["webhook_url"] = discord_config.get("webhook_url", "")
-        else:
+        from duong_dan_db import duong_dan_db
+        conn = sqlite3.connect(duong_dan_db())
+        conn.row_factory = sqlite3.Row
+        account = conn.execute(
+            "SELECT * FROM accounts WHERE platform = 'discord' AND organization_id = ?",
+            (organization_id,),
+        ).fetchone()
+        conn.close()
+        if not account:
             raise HTTPException(status_code=400,
-                              detail="Discord webhook not configured. Create discord_webhook.json")
+                              detail="Discord webhook not configured for this organization. "
+                                     "Add a Discord account first.")
+        from main import decrypt
+        kwargs["webhook_url"] = decrypt(account["password_encrypted"])
 
-    if platform == "substack":
-        config_path = Path("substack_config.json")
-        if config_path.exists():
-            sub_config = json.loads(config_path.read_text())
-            kwargs["publication_url"] = sub_config.get("publication_url", "")
+    # Substack's publication_url has no per-organization storage today (the
+    # old shared substack_config.json was exactly the bug this sweep found —
+    # every organization's post used whichever URL was in that one file).
+    # Rather than reintroduce shared state, this is left unset; the automation
+    # falls back to https://substack.com/home. Per-org publication_url needs a
+    # real storage decision (e.g. a column on `accounts`) before it comes back.
 
     try:
         # D1/A5: `organization_id` chọn đúng tệp phiên Playwright của tổ chức
@@ -156,6 +171,7 @@ async def openclaw_publish(request: OpenClawPublishRequest, organization_id: str
 
         # Log the event
         log_bridge_event({
+            "organization_id": organization_id,
             "timestamp": timestamp,
             "platform": platform,
             "content_type": request.content_type,
@@ -176,6 +192,7 @@ async def openclaw_publish(request: OpenClawPublishRequest, organization_id: str
 
     except Exception as e:
         log_bridge_event({
+            "organization_id": organization_id,
             "timestamp": timestamp,
             "platform": platform,
             "content_type": request.content_type,
@@ -212,10 +229,12 @@ async def openclaw_batch_publish(request: BatchPublishRequest, organization_id: 
 
 
 @router.get("/status")
-async def openclaw_platform_status():
-    """Check which platforms have saved sessions / are ready to post"""
+async def openclaw_platform_status(organization_id: str = Depends(require_org)):
+    """Check which platforms have saved sessions / are ready to post (this organization only)"""
     from automation_extended import get_automation_extended
+    from to_chuc import bat_buoc
 
+    org_id = bat_buoc(organization_id)
     sessions_dir = Path("sessions")
     status = {}
 
@@ -223,7 +242,7 @@ async def openclaw_platform_status():
                  "medium", "substack", "heygen", "beehiiv", "mailerlite", "brevo"]
 
     for p in platforms:
-        session_file = sessions_dir / f"{p}_session.json"
+        session_file = sessions_dir / f"{org_id}_{p}_session.json"
         has_session = session_file.exists()
 
         status[p] = {
@@ -240,11 +259,18 @@ async def openclaw_platform_status():
             except Exception:
                 pass
 
-    # Discord check
-    webhook_config = Path("discord_webhook.json")
+    # Discord check — same per-organization source as /publish (accounts
+    # table), not the old shared discord_webhook.json.
+    from duong_dan_db import duong_dan_db
+    conn = sqlite3.connect(duong_dan_db())
+    has_discord = conn.execute(
+        "SELECT 1 FROM accounts WHERE platform = 'discord' AND organization_id = ?",
+        (org_id,),
+    ).fetchone() is not None
+    conn.close()
     status["discord"] = {
-        "has_session": webhook_config.exists(),
-        "ready": webhook_config.exists(),
+        "has_session": has_discord,
+        "ready": has_discord,
         "type": "webhook"
     }
 
@@ -252,14 +278,23 @@ async def openclaw_platform_status():
 
 
 @router.get("/history")
-async def openclaw_publish_history(limit: int = 50):
-    """Get recent publish history"""
+async def openclaw_publish_history(limit: int = 50, organization_id: str = Depends(require_org)):
+    """Get recent publish history for this organization only.
+
+    Đợt 5 (rà soát bảo mật): trước đây route này trả TOÀN BỘ log dùng chung,
+    không lọc theo tổ chức nào — bất kỳ tổ chức nào gọi cũng thấy lịch sử
+    đăng bài của mọi tổ chức khác. Sự kiện ghi trước khi có sửa này không
+    mang organization_id — loại hẳn khỏi kết quả thay vì đoán chúng thuộc
+    tổ chức nào, để không lộ nhầm cho một tổ chức không liên quan.
+    """
     events = []
     if BRIDGE_LOG_PATH.exists():
         try:
             events = json.loads(BRIDGE_LOG_PATH.read_text())
         except Exception:
             events = []
+
+    events = [e for e in events if e.get("organization_id") == organization_id]
 
     # Return most recent first
     return {"events": list(reversed(events[-limit:]))}

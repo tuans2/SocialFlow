@@ -76,10 +76,11 @@ class QueueVideoRequest(BaseModel):
 # ─── JOB MANAGEMENT ──────────────────────────────────────────
 
 @router.post("/jobs")
-async def create_job(request: CreateVideoJobRequest):
-    """Create a new HeyGen video generation job"""
+async def create_job(request: CreateVideoJobRequest, organization_id: str = Depends(require_org)):
+    """Create a new HeyGen video generation job, scoped to the caller's organization"""
     job = create_heygen_job(
         script=request.script,
+        organization_id=organization_id,
         campaign=request.campaign,
         topic=request.topic,
         platform_targets=request.platform_targets or ["instagram", "youtube", "linkedin"],
@@ -91,33 +92,33 @@ async def create_job(request: CreateVideoJobRequest):
 
 
 @router.get("/jobs")
-async def get_jobs(state: str = None, limit: int = 50):
-    """List HeyGen jobs, optionally filtered by state"""
-    jobs = list_jobs(state=state, limit=limit)
+async def get_jobs(state: str = None, limit: int = 50, organization_id: str = Depends(require_org)):
+    """List HeyGen jobs belonging to the caller's organization, optionally filtered by state"""
+    jobs = list_jobs(organization_id=organization_id, state=state, limit=limit)
     return {"jobs": jobs, "total": len(jobs)}
 
 
 @router.get("/jobs/{job_id}")
-async def get_job_details(job_id: str):
-    """Get details of a specific job"""
-    job = get_job(job_id)
+async def get_job_details(job_id: str, organization_id: str = Depends(require_org)):
+    """Get details of a specific job (this organization's only)"""
+    job = get_job(job_id, organization_id=organization_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     return {"job": job}
 
 
 @router.post("/jobs/{job_id}/generate")
-async def trigger_generation(job_id: str):
+async def trigger_generation(job_id: str, organization_id: str = Depends(require_org)):
     """
     Trigger video generation for a job.
     Requires HeyGen to be logged in.
     Opens browser, navigates to HeyGen editor, inputs script.
     """
-    job = get_job(job_id)
+    job = get_job(job_id, organization_id=organization_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
-    adapter = HeyGenVideoAdapter(headless=False)
+    adapter = HeyGenVideoAdapter(headless=False, organization_id=organization_id)
     try:
         result = await adapter.create_video(job_id)
         return result
@@ -132,7 +133,7 @@ async def register_job_output(job_id: str, request: RegisterOutputRequest, organ
     Call this after the video is downloaded/available from HeyGen.
     Creates an asset in the SocialFlow inventory.
     """
-    job = get_job(job_id)
+    job = get_job(job_id, organization_id=organization_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
@@ -159,20 +160,24 @@ async def register_job_output(job_id: str, request: RegisterOutputRequest, organ
 
     # Transition job to completed first if still in draft/queued, then to ready
     if job["state"] in (HeyGenJobState.DRAFT, HeyGenJobState.QUEUED):
-        update_job_state(job_id, HeyGenJobState.QUEUED, details="Manual output registration")
-        update_job_state(job_id, HeyGenJobState.GENERATING, details="Manually marked generating")
-        update_job_state(job_id, HeyGenJobState.COMPLETED, details="Manually completed",
+        update_job_state(job_id, HeyGenJobState.QUEUED, organization_id=organization_id,
+                        details="Manual output registration")
+        update_job_state(job_id, HeyGenJobState.GENERATING, organization_id=organization_id,
+                        details="Manually marked generating")
+        update_job_state(job_id, HeyGenJobState.COMPLETED, organization_id=organization_id,
+                        details="Manually completed",
                         output_path=request.file_path, output_url=request.file_url)
 
     if job["state"] in (HeyGenJobState.COMPLETED, HeyGenJobState.FAILED):
         pass  # already completed or failed
 
     # Now transition to ready_for_distribution
-    updated_job = get_job(job_id)
+    updated_job = get_job(job_id, organization_id=organization_id)
     if updated_job and updated_job["state"] in (HeyGenJobState.COMPLETED, HeyGenJobState.FAILED):
         update_job_state(
             job_id,
             HeyGenJobState.READY,
+            organization_id=organization_id,
             details=f"Output registered as {asset['asset_id']}",
             output_path=request.file_path,
             output_url=request.file_url
@@ -192,7 +197,7 @@ async def distribute_to_platforms(job_id: str, request: QueueVideoRequest, organ
     Create platform-specific queue entries for a completed video.
     This routes the video to Instagram, YouTube, LinkedIn, etc.
     """
-    job = get_job(job_id)
+    job = get_job(job_id, organization_id=organization_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
