@@ -94,7 +94,8 @@ try:
     except Exception as e:
         check("no auth → 401", f"other: {type(e).__name__}", "401")
 
-    # ── 3. Authenticated request (will fail at core, not auth) ──
+    # ── 3. Authenticated request — route khai tử (nợ #80, 17/09): PHẢI 410
+    #    cho mọi thân, kể cả product_id hợp lệ. M04b thật nay ở floraos-core.
     try:
         req = urllib.request.Request(
             "http://localhost:8100/api/m04b/background-removal",
@@ -102,19 +103,14 @@ try:
             headers={"Content-Type": "application/json", **headers},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            body = json.loads(resp.read())
-        check("authed request → 200", resp.status, 200)
-        if resp.status == 200:
-            check("has asset_id", bool(body.get("asset_id")), True)
-            check("status PENDING", body.get("status"), "PENDING")
+        urllib.request.urlopen(req, timeout=10)
+        check("authed request → 410 (route đã khai tử)", False, True)
     except urllib.error.HTTPError as e:
         body = e.read().decode()[:200]
-        # Expected: core not running → 502 or connection error
-        check("authed request (core unavailable)", e.code in (502, 503, 500), True)
-        print(f"  (core unavailable, got {e.code}: {body})")
+        check("authed request → 410 (route đã khai tử)", e.code, 410)
+        check("410 detail nhắc floraos-core", "floraos-core" in body, True)
     except Exception as e:
-        check("authed request", False, True)
+        check("authed request → 410 (route đã khai tử)", False, True)
         print(f"  authed request error: {e}")
 
     # ── 4. Frontend loads ────────────────────────

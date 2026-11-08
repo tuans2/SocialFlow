@@ -41,6 +41,11 @@ from migrations import run_migrations
 from analytics_store import init_analytics_tables, register_analytics_routes
 from visual_content_routes import router as visual_router
 from brand_kit import router as brand_router, init_brand_tables
+# Nợ #80 (floraos-core/docs/dac-ta/TECHNICAL_DEBT.md): route M04b của repo này
+# đã khai tử 17/09 — M04b thật (tách nền + ghép bối cảnh + watermark + 4 tỷ lệ,
+# có Subject Integrity gate) đã dựng xong trong floraos-core từ P24. Import giữ
+# lại (route module vẫn còn, chỉ đổi POST sang 410) để endpoint download ảnh cũ
+# còn phục vụ được.
 from m04b.routes import router as m04b_router
 from m07.routes import router as m07_router
 from agents.orchestrator import (
@@ -984,7 +989,9 @@ app.add_middleware(
 
 # Register OpenClaw bridge routes
 app.include_router(openclaw_router)
-# Register M04b marketing creative routes
+# M04b của SocialFlow đã khai tử (nợ #80, 17/09) — route module vẫn đăng ký để
+# giữ endpoint download ảnh cũ, nhưng POST /api/m04b/background-removal nay trả
+# 410 (xem m04b/routes.py). Việc dựng biến thể marketing thật nằm ở floraos-core.
 app.include_router(m04b_router)
 # Register M07 AI content engine routes
 app.include_router(m07_router)

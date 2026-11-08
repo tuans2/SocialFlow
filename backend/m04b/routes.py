@@ -1,15 +1,9 @@
-from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
-from org_context import require_org, sso_token_tho
-from m04b.domain.models import BackgroundRemovalRequest
-from m04b.use_cases.background_removal import (
-    request_background_removal,
-)
+from org_context import require_org
 
 UPLOADS_DIR = Path(__file__).resolve().parent / "uploads"
 
@@ -19,36 +13,30 @@ router = APIRouter(
     dependencies=[Depends(require_org)],
 )
 
+# Nợ #80 (floraos-core/docs/dac-ta/TECHNICAL_DEBT.md) — rà 17/09 phát hiện route
+# này chưa từng gọi POST /integration/usage (hàm ghi_usage() có sẵn trong
+# floraos_core.py nhưng không nơi nào gọi tới) và không có bước kiểm năng lực
+# (capabilities/check) trước khi chạy — bất kỳ phiên đăng nhập hợp lệ nào của
+# một tổ chức đều chạy được vô hạn lần, không tính hạn mức/chi phí. Quyết định:
+# khai tử, không vá — M04b thật (tách nền + ghép bối cảnh + watermark + 4 tỷ lệ,
+# có cổng Subject Integrity đo lõi chủ thể) đã dựng xong trong floraos-core từ
+# P24 (`workers/media_ai/jobs/variant_worker.py`, endpoint
+# `POST /api/v1/media/variants` — năng lực I4/I5, có capability + credit + audit
+# đầy đủ qua RBAC của chính floraos-core). Route cũ ở đây không còn lý do tồn tại
+# song song. Endpoint tải ảnh cũ (`/assets/{asset_id}/download`) GIỮ LẠI, vì các
+# asset đã tạo trước đây vẫn cần tải được — chỉ đường TẠO MỚI bị khoá.
+
 
 @router.post("/background-removal")
-async def api_background_removal(
-    request: Request,
-    body: BackgroundRemovalRequest,
-    organization_id: str = Depends(require_org),
-    sso_token: Optional[str] = Depends(sso_token_tho),
-):
-    try:
-        result = request_background_removal(
-            organization_id=organization_id,
-            request=body,
-            sso_token=sso_token,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(status_code=502, detail=str(e))
-
-    return {
-        "asset_id": result.asset_id,
-        "product_id": result.product_id,
-        "parent_asset_id": result.parent_asset_id,
-        "storage_key": result.storage_key,
-        "mime_type": result.mime_type,
-        "width": result.width,
-        "height": result.height,
-        "status": "PENDING",
-        "created_at": datetime.utcnow().isoformat(),
-    }
+async def api_background_removal():
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "Route này đã khai tử (nợ #80, 17/09) — dùng M04b thật trong "
+            "floraos-core: POST /api/v1/media/variants (yêu cầu Master Image đã "
+            "duyệt, năng lực I4)."
+        ),
+    )
 
 
 @router.get("/assets/{asset_id}/download")

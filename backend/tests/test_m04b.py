@@ -157,29 +157,24 @@ routes = [r.path for r in test_app.routes if hasattr(r, "path")]
 check("route background-removal", "/api/m04b/background-removal" in routes, True)
 check("route download", "/api/m04b/assets/{asset_id}/download" in routes, True)
 
+# Nợ #80 — route khai tử 17/09 (xem m04b/routes.py): POST trả 410 cho MỌI lời
+# gọi, kể cả sản phẩm hợp lệ. Dùng use-case trực tiếp ở trên (không qua HTTP)
+# để vẫn kiểm được `background_removal.py`/`image_processor.py` còn đúng —
+# hai module đó KHÔNG bị xoá, chỉ mất đường vào qua route.
 res = test_client.post(
     "/api/m04b/background-removal",
     json={"product_id": _TEST_PRODUCT},
     headers={"X-FloraOS-SSO": "test-token"},
 )
-check("API status", res.status_code, 200)
-if res.status_code == 200:
-    data = res.json()
-    check("API has asset_id", "asset_id" in data, True)
-    check("API has storage_key", "storage_key" in data, True)
-    check("API status PENDING", data.get("status"), "PENDING")
-else:
-    FAIL.append(("API detail", res.json(), "200 with asset_id"))
-
-# Auth dependency is verified by route existence and successful calls above;
-# the 401 case requires unpatched require_org and belongs in integration tests.
+check("API status → 410 (route đã khai tử)", res.status_code, 410)
+check("API detail nhắc floraos-core", "floraos-core" in res.json().get("detail", ""), True)
 
 res_bad = test_client.post(
     "/api/m04b/background-removal",
     json={"product_id": "non-existent"},
     headers={"X-FloraOS-SSO": "test-token"},
 )
-check("API bad product → 502", res_bad.status_code, 502)
+check("API bad product → vẫn 410 (không chạm use-case nữa)", res_bad.status_code, 410)
 
 res_download = test_client.get(
     f"/api/m04b/assets/{result.asset_id}/download",

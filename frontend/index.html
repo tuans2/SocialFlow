@@ -3174,11 +3174,13 @@
 
                     <div className="grid-2">
                         <div className="card">
-                            <div className="card-title">🎨 AI Background Removal</div>
+                            <div className="card-title">🎨 AI Background Removal (retired)</div>
                             <p style={{ color: 'var(--text-muted)', marginBottom: '20px', fontSize: '13px' }}>
-                                Remove background from a product image using AIC-11 background_removal.
-                                Takes a Master Image from core, removes background (rembg + PIL fallback),
-                                and registers the result as an asset.
+                                This tool has been retired (nợ #80, 17/09) — the real M04b pipeline
+                                (background removal + backdrop compositing + watermark + 4 aspect
+                                ratios, with a Subject Integrity gate) now lives in floraos-core
+                                (`POST /api/v1/media/variants`). This backend route now returns
+                                410 Gone. Use the FloraOS product page to generate marketing variants.
                             </p>
 
                             <div className="form-group">
@@ -3189,11 +3191,12 @@
                                     placeholder="e.g., 550e8400-e29b-41d4-a716-446655440000"
                                     value={productId}
                                     onChange={e => setProductId(e.target.value)}
+                                    disabled
                                 />
                             </div>
 
-                            <button className="btn btn-primary" onClick={removeBackground} disabled={loading || !productId} style={{ width: '100%' }}>
-                                {loading ? <><div className="spinner" /> Removing...</> : '🎯 Remove Background'}
+                            <button className="btn btn-primary" onClick={removeBackground} disabled style={{ width: '100%' }}>
+                                🚫 Retired — use floraos-core
                             </button>
 
                             {error && (

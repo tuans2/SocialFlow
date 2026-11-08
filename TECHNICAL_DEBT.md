@@ -218,3 +218,33 @@ D1 (`floraos-core/claude/PRD-floraos-core.md` §12 Sổ quyết định) đóng 
 - **Endpoint thao tác-theo-ID** (`approve`/`reject`/`publish`) chưa kiểm tra bài viết thuộc đúng tổ chức gọi — thuộc phạm vi soát bảo mật Nhóm D.
 
 Chi tiết đầy đủ từng bước ở các mục "D1 (đa tenant thật) — A1" … "A6" phía trên trong chính tệp này. Trạng thái cấp lộ trình ở `floraos-core/docs/kien-truc/UNIFIED_SHELL.md` §7 và `TRANG_THAI.md`.
+
+
+## M04b khai tử, 2026-09-17
+
+Rà theo nợ #80 của `floraos-core` (`docs/dac-ta/TECHNICAL_DEBT.md`), yêu cầu bởi chủ sản phẩm cùng lượt với nợ #71 (chi phí thật M04a/M04b).
+
+### Phát hiện
+
+Đối chiếu bốn câu hỏi mà nợ #80 đặt ra (auth, tổ chức, credit, ghi `assets`) cho `POST /api/m04b/background-removal`:
+
+- **Auth** — ổn. `require_org` (`org_context.py`) xác minh JWT `floraos_sso` thật do `floraos-core` ký, không còn giá trị tự khai như trước Đợt 3.
+- **Tổ chức** — ổn. `BackgroundRemovalRequest` chỉ có `product_id`; `organization_id` CHỈ tới từ `require_org`, bên gọi không có trường nào để tự khai.
+- **Credit/hạn mức** — KHÔNG ổn. `m04b/use_cases/background_removal.py` dùng `m04b/infra/core_client.py` (`CoreClientAdapter`) — client này CHỈ có `get_master_image`/`download_image`/`register_asset`/`list_assets`, không có phương thức ghi usage nào. `floraos_core.py` có một `CoreClient` KHÁC với `ghi_usage()` gọi `POST /integration/usage`, nhưng route M04b không dùng client đó — grep toàn repo xác nhận `ghi_usage` không được gọi ở bất kỳ đâu. Route cũng không gọi `POST /integration/capabilities/check` trước khi chạy. Kết quả: bất kỳ phiên đăng nhập hợp lệ nào của một tổ chức gọi được route này vô hạn lần, không tính vào hạn mức hay chi phí nào ở phía `floraos-core`.
+- **Ghi `assets`** — ổn. `register_asset` gọi đúng `POST /integration/assets`, đúng lược đồ (`kind: MARKETING`, `parent_asset_id` trỏ Master, `approval_state` do core đặt `PENDING`, không do engine ngoài tự đặt).
+
+### Quyết định
+
+Khai tử, không vá. M04b thật (tách nền + ghép bối cảnh theo preset + watermark tuỳ chọn + 4 tỷ lệ, có cổng Subject Integrity đo lõi chủ thể) đã dựng xong trong `floraos-core` từ P24 (`workers/media_ai/jobs/variant_worker.py`, `POST /api/v1/media/variants`, năng lực `I4`/`I5`, đi qua RBAC + hạn mức thật của chính `floraos-core`). Route ở đây chỉ còn là bản hẹp hơn (tách nền đơn thuần) và không đo được credit/chi phí — không còn lý do giữ song song.
+
+### Những gì đã đổi
+
+- `backend/m04b/routes.py` — `POST /background-removal` nay luôn trả `410 Gone`, trỏ sang `POST /api/v1/media/variants` của `floraos-core`. `GET /assets/{id}/download` GIỮ NGUYÊN — asset đã tạo trước đây vẫn tải được.
+- `backend/main.py` — vẫn đăng ký `m04b_router` (để giữ endpoint download), có chú thích rõ lý do.
+- `frontend/index.html` (`MarketingCreative`) — thẻ "AI Background Removal" đổi thành trạng thái đã khai tử, nút và ô nhập bị vô hiệu hoá, không còn gọi được route cũ.
+- `backend/tests/test_m04b.py`, `backend/tests/e2e_m04b.py` — phần kiểm route cập nhật để mong đợi `410` thay vì `200`/`502`; phần kiểm use-case thuần (`background_removal.py`, `image_processor.py`, không qua HTTP) giữ nguyên vì hai module đó không bị xoá, chỉ mất đường vào qua HTTP.
+
+### Chưa làm (ngoài phạm vi lượt này)
+
+- Không xoá `m04b/use_cases/background_removal.py` hay `m04b/adapters/image_processor.py` — vẫn còn được `tests/test_m04b.py` gọi trực tiếp, và xoá hẳn là việc dọn dẹp riêng, không phải một quyết định sản phẩm.
+- `m04b/infra/core_client.py` (client thiếu `ghi_usage`) không bị xoá — không còn đường gọi tới nó sau khi route trả 410, nhưng dọn nó là việc dọn rác riêng.
